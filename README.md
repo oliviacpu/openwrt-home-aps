@@ -55,7 +55,7 @@ build/publish.sh           all devices: version-drift gate, SHA256SUMS, usign si
 | `htop`, `tmux`, `nano`, `curl`, `iperf3`, `tcpdump-mini` | Everyday CLI |
 | `mtr-nojson`, `ethtool`, `drill` | Network diagnostics: per-hop loss, link/PoE port errors, DNS queries |
 | `lldpd` | Announces the AP to the switch via LLDP/CDP (name, IP, model, port) |
-| `usteer`, `luci-app-usteer`, `wpad-mbedtls` | Roaming between the APs on the same SSID with 802.11k/v hints; full hostapd for 802.11v (replaces `wpad-basic-mbedtls`). The shared policy ([`98-usteer-policy`](overlay/common/etc/uci-defaults/98-usteer-policy)) never force-disconnects a client. |
+| `usteer`, `luci-app-usteer`, `wpad-mbedtls` | Roaming between the APs on the same SSID with 802.11k/v hints; full hostapd for 802.11v (replaces `wpad-basic-mbedtls`). usteer is built from a pinned upstream commit ([`build/usteer.sh`](build/usteer.sh), SDK of the same release) with its startup aggressiveness patched to 1: 802.11v suggestions only, never a forced disconnect. The shared policy ([`98-usteer-policy`](overlay/common/etc/uci-defaults/98-usteer-policy)) enables polite roaming only with that build, and falls back to zero-kick settings with any other usteer. |
 | Oh My Posh, Oh My Zsh (core), `/root/.zshrc`, `ap-status` | Root logs in to zsh with an Oh My Posh prompt and a status card (firmware, health, LLDP uplink, radios, roaming peers). Oh My Posh is built from a pinned upstream tag for each device's architecture; Oh My Zsh is a pinned commit, core only. The prompt's host name comes from `/etc/ap-id`. |
 | `luci-mod-rpc`, `mosquitto-client-nossl` | Home Assistant: the LuCI JSON-RPC endpoint used by HA's OpenWrt integration, and the MQTT client for `ha-mqtt` |
 | `ha-mqtt` (+ `/etc/config/ha_mqtt`) | Publishes AP health to Home Assistant via MQTT discovery (firmware update, temperatures, channel load/noise, clients, tx retries/drops, roams, weak clients, uplink). Ships **disabled with no broker credentials**; set them on the device only (`/etc/config/ha_mqtt` is kept across updates). |
@@ -77,6 +77,8 @@ the clock.
 shown as `auto.blocked`. The shared `50-peer-down` hook holds an install while the other AP is
 unreachable (usteer sees no peer), so at least one AP always serves Wi-Fi. **Install now** in LuCI
 bypasses the hooks.
+
+**Install from Home Assistant.** `ha-mqtt` gives each AP's firmware update entity an Install button when the image's `ghupdate` supports `remote-install`. A press is checked like an automatic install (newer build for this device, inhibit hooks, signature, checksum, `sysupgrade -T`), skips the soak and install hour, and is limited to one per 15 minutes.
 
 **Only changed devices update.** Each image carries a content key (`GHU_DEVKEY`: OpenWrt version,
 resolved package versions, every added file). A release lists one key per device, and a device offers

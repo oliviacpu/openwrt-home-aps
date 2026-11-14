@@ -37,6 +37,8 @@ check "repo-rename migration present"       "test -x '$R/etc/uci-defaults/93-ghu
 check "peer-down inhibit hook executable"   "test -x '$R/etc/ghupdate/inhibit.d/50-peer-down'"
 check "release public key present"          "grep -q '^RW' '$R/etc/ghupdate/release.pub'"
 check "LuCI module + views present"         "test -f '$R/www/luci-static/resources/ghupdate.js' && test -f '$R/www/luci-static/resources/view/status/include/05_ghupdate.js' && test -f '$R/www/luci-static/resources/view/system/ghupdate.js'"
+check "ghupdate takes HA installs (ha-mqtt looks for the remote-install label)" "grep -q '^[[:space:]]*remote-install)' '$R/usr/sbin/ghupdate'"
+check "HA ACL: no firmware, shell, package or shadow access" "jq -e '.homeassistant as \$h | ([\$h.read.file, \$h.write.file] | map(keys) | add | map(select(test(\"^/(bin/(sh|ash|opkg)|sbin/(apk|sysupgrade)|etc/shadow)\$\"))) | length == 0) and (\$h.read.ubus.system == [\"info\",\"board\"]) and (\$h.write.ubus.system == [\"reboot\"]) and (\$h.read.ubus | has(\"attendedsysupgrade\") | not) and (\$h.read.ubus.luci == [\"getMountPoints\"])' '$R/usr/share/rpcd/acl.d/homeassistant.json' >/dev/null"
 check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/homeassistant.json' >/dev/null"
 for t in usign uclient-fetch jsonfilter sha256sum; do
 	check "device has $t"                   "find '$R/bin' '$R/sbin' '$R/usr/bin' '$R/usr/sbin' -maxdepth 1 -name '$t' | grep -q ."
@@ -46,7 +48,15 @@ done
 check "DHCP-client LAN default (fresh installs only)" "test -f '$R/etc/uci-defaults/99-lan-dhcp' && grep -q '192.168.1.1' '$R/etc/uci-defaults/99-lan-dhcp'"
 check "LAN default leaves a Home/Away Beryl alone" "grep -q '/etc/beryl-mode/current' '$R/etc/uci-defaults/99-lan-dhcp'"
 check "dumb-AP NTP/DNS fix is executable"   "test -x '$R/etc/hotplug.d/iface/95-resolv-for-jails'"
-check "usteer policy: zero kicks, aggressiveness 1" "f='$R/etc/uci-defaults/98-usteer-policy'; grep -q 'aggressiveness=1' \"\$f\" && grep -q 'roam_scan_snr=0' \"\$f\" && grep -q 'roam_trigger_snr=0' \"\$f\" && grep -q 'min_snr=0' \"\$f\" && grep -q 'load_kick_enabled=0' \"\$f\""
+check "usteer policy: aggressiveness 1, no min_snr/load kicks, roaming only on our build" "f='$R/etc/uci-defaults/98-usteer-policy'; grep -q 'aggressiveness=1' \"\$f\" && grep -q 'min_snr=0' \"\$f\" && grep -q 'load_kick_enabled=0' \"\$f\" && grep -q -- '\*-r100) POLICY=2' \"\$f\" && grep -q 'roam_scan_snr=0' \"\$f\""
+# usteer must be a reviewed build: ours from source (-r100, passive default patched in) or the feed's
+# 1d6524c6 (kept zero-kick by the policy). Anything else could kick at its default aggressiveness.
+uv=$(awk '/^P:usteer$/ { f = 1 } f && /^V:/ { print substr($0, 3); exit }' "$DB")
+case $uv in
+	*~7532e125-r100) check "usteer is our source build ($uv)" true ;;
+	2025.10.04~1d6524c6-*) check "usteer is the feed build ($uv): zero-kick policy, no roaming" true ;;
+	*) check "usteer $uv is a reviewed build (7532e125-r100 or feed 1d6524c6)" false ;;
+esac
 
 # --- packages: everything requested is installed; things we keep out are out
 for p in $(sed -e 's/#.*//' "$ROOT/packages/common.txt" "$ROOT/packages/$PROFILE.txt" 2>/dev/null | tr -s ' \t' '\n\n' | grep -v '^-' | grep . || true); do

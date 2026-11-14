@@ -7,6 +7,7 @@
 #   ghupdate install   prepare + apply
 #   ghupdate start     prepare in the background, return at once (used by the web UI)
 #   ghupdate auto      check, then install if the auto-install rules allow it (cron, hourly)
+#   ghupdate remote-install   install requested from Home Assistant (ha-mqtt); see below
 #   ghupdate status    print the status JSON
 #
 # Settings: /etc/config/ghupdate  (repo, auto, soak_days, hour, auto_major)
@@ -247,6 +248,21 @@ auto() {
 	apply
 }
 
+# The detached half of remote-install (lock held).
+remote_run() {
+	local why
+	check
+	update_available || { log "install from Home Assistant: nothing newer for this device ($GHU_TAG installed)"; exit 0; }
+	if why=$(inhibit_reason); then
+		log "install from Home Assistant refused: $why"
+		write_status update-available "Install from Home Assistant refused: $why"
+		exit 0
+	fi
+	log "installing $L_TAG as requested from Home Assistant"
+	prepare
+	apply
+}
+
 # Simple non-blocking lock (busybox 'lock' has no try-lock): a directory holding our PID.
 take_lock() {
 	if mkdir "$LOCKDIR" 2>/dev/null; then echo $$ > "$LOCKDIR/pid"; return 0; fi
@@ -273,7 +289,23 @@ case "$cmd" in
 		start-stop-daemon -S -b -x /usr/sbin/ghupdate -- prepare
 		exit 0 ;;
 	check|prepare|apply|install|auto) ;;
-	*) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+	remote-install)
+		# Requested from Home Assistant (ha-mqtt's install button). Same image checks as every
+		# install (signature, checksum, sysupgrade -T), newer builds for this device only, and every
+		# inhibit hook applies (Away mode, the other AP down). No soak or install hour: someone asked.
+		# At most one accepted request per 15 minutes. Runs detached; progress shows in status.json.
+		lock_busy && { log "install from Home Assistant refused: another ghupdate run is in progress"; exit 75; }
+		last=$(cat "$RUN/remote-last" 2>/dev/null); case "$last" in ''|*[!0-9]*) last=0 ;; esac
+		if [ $(( $(now) - last )) -lt 900 ]; then
+			log "install from Home Assistant refused: one request per 15 minutes (last at $(date -d "@$last" +%H:%M))"
+			exit 75
+		fi
+		now > "$RUN/remote-last"
+		log "install requested from Home Assistant"
+		start-stop-daemon -S -b -x /usr/sbin/ghupdate -- remote-run
+		exit 0 ;;
+	check|prepare|apply|install|auto|remote-run) ;;
+	*) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 take_lock || { echo "another ghupdate run is in progress" >&2; exit 75; }
@@ -285,4 +317,5 @@ case "$cmd" in
 	apply)   apply ;;
 	install) prepare; apply ;;
 	auto)    auto ;;
+	remote-run) remote_run ;;
 esac

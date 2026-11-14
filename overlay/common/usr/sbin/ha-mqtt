@@ -5,6 +5,7 @@
 #
 #   ha-mqtt run        loop forever (procd: /etc/init.d/ha-mqtt)
 #   ha-mqtt dry-run    print the discovery configs and one state message, publish nothing
+#   ha-mqtt listen     HA firmware installs (procd, second instance): see "firmware installs" below
 #
 # Every sensor reads one key from a single JSON state topic, and has expire_after = 3 intervals.
 # Missing or implausible data (no 5 GHz AP, no fan, a sensor that isn't ready) is published as null
@@ -87,15 +88,25 @@ lldp_neighbors() {  # every LLDP/CDP neighbour, "<name> <port> (<via>)" joined b
 		/\.via=/ { flush(); via = $2 } /\.chassis\.name=/ { name = $2 } /\.port\.descr=/ { port = $2 }
 		END { flush(); printf "%s", out }'
 }
-firmware_json() {  # Netgear image updates (ghupdate) for a read-only MQTT update entity
+firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	command -v ghupdate >/dev/null 2>&1 || return
 	GHU_SERIAL=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
-	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial')"
+	ST= UA= LS= LU= MSG= BLK=
+	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial' \
+		-e 'LU=@.latest.url' -e 'MSG=@.message' -e 'BLK=@.auto.blocked')"
 	inst="build ${GHU_SERIAL:-?}"; latest=$inst
 	case "$UA" in true|1) [ -n "$LS" ] && latest="build $LS" ;; esac
-	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","release_summary":"ghupdate state: %s"}\n' \
-		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$(esc "${ST:-unknown}")"
+	prog=false; case "$ST" in downloading|ready|installing) prog=true ;; esac
+	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
+	sum=$(printf '%s' "$sum" | cut -c1-250)   # HA's release_summary limit is 255
+	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","in_progress":%s,"release_url":%s,"release_summary":"%s"}\n' \
+		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$prog" "$(str "$LU")" "$(esc "$sum")"
 }
+# HA-triggered installs need a ghupdate with `remote-install` (rate limit, newer-only, inhibit hooks,
+# signature + checksum + sysupgrade -T). Detected by reading the script, never by running it:
+# `remote-install` takes no arguments and any call is a real install request. Without it, HA's
+# update entity stays read-only.
+remote_ok() { g=$(command -v ghupdate 2>/dev/null) && grep -q '^[[:space:]]*remote-install)' "$g"; }
 signals() {  # "dBm MAC" for every station on this AP's access points (same as ha-wifi's stations)
 	for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
 	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k, $1; break } }'; }
@@ -182,9 +193,11 @@ discovery() {  # prints "topic<TAB>payload" lines; uses $LANIP (may be empty: th
 		printf '%s/sensor/%s/%s/config\t{"name":"%s","unique_id":"%s_%s","default_entity_id":"sensor.%s_%s","state_topic":"%s","value_template":"{{ value_json.%s }}","expire_after":%s%s,"device":%s}\n' \
 			"$DPREFIX" "$NODE" "$key" "$name" "$NODE" "$key" "$NODE" "$key" "$STATE_TOPIC" "$key" $((INTERVAL * 3)) "$extra" "$dev"
 	done
-	if command -v ghupdate >/dev/null 2>&1; then  # read-only: no command_topic, so HA can't trigger a flash
-		printf '%s/update/%s/firmware/config\t{"name":"Firmware","unique_id":"%s_firmware_update","default_entity_id":"update.%s_firmware","state_topic":"%s/%s/firmware","device_class":"firmware","device":%s}\n' \
-			"$DPREFIX" "$NODE" "$NODE" "$NODE" "$TPREFIX" "$NODE" "$dev"
+	if command -v ghupdate >/dev/null 2>&1; then
+		# Install button only with remote-install (see remote_ok); otherwise read-only.
+		cmd=; remote_ok && cmd=$(printf ',"command_topic":"%s/%s/firmware/install","payload_install":"install"' "$TPREFIX" "$NODE")
+		printf '%s/update/%s/firmware/config\t{"name":"Firmware","unique_id":"%s_firmware_update","default_entity_id":"update.%s_firmware","state_topic":"%s/%s/firmware","device_class":"firmware"%s,"device":%s}\n' \
+			"$DPREFIX" "$NODE" "$NODE" "$NODE" "$TPREFIX" "$NODE" "$cmd" "$dev"
 	fi
 }
 
@@ -203,8 +216,14 @@ write_opts() {  # broker options live in a 0600 file, never on the command line 
 	# The options file holds one "-flag value" per line and can't quote, so reject whitespace.
 	case "$(cfg host)$user$pass" in *" "*|*"	"*)
 		logger -t ha-mqtt "host, username and password must not contain spaces or tabs"; exit 1 ;; esac
-	{ echo "-h $(cfg host)"; echo "-p $port"; echo "-i ha-mqtt-$NODE"
-	  [ -n "$user" ] && echo "-u $user"; [ -n "$pass" ] && echo "-P $pass"; } > /tmp/ha-mqtt/mosquitto_pub
+	# Written to a temp file and moved into place: the publisher and the listener both call this.
+	# mosquitto_pub and mosquitto_sub each read their own file here; separate client ids, because
+	# a second connection with the same id would disconnect the first.
+	for c in pub sub; do
+		{ echo "-h $(cfg host)"; echo "-p $port"; echo "-i ha-mqtt-$NODE-$c"
+		  [ -n "$user" ] && echo "-u $user"; [ -n "$pass" ] && echo "-P $pass"; } > /tmp/ha-mqtt/.mosquitto_$c.$$
+		mv /tmp/ha-mqtt/.mosquitto_$c.$$ /tmp/ha-mqtt/mosquitto_$c
+	done
 }
 
 case "${1:-run}" in
@@ -251,5 +270,39 @@ case "${1:-run}" in
 			n=$((n + 1)); sleep "$INTERVAL"
 		done
 		;;
-	*) echo "usage: ha-mqtt run | dry-run" >&2; exit 2 ;;
+	listen)
+		# ---------- firmware installs from Home Assistant ----------
+		# HA's update entity publishes "install" (not retained) to <prefix>/<node>/firmware/install.
+		# -R skips any stale retained message at connect, and the payload must match exactly. Then
+		# `ghupdate remote-install` (no arguments) decides and returns at once: exit 0 = accepted, and
+		# it runs detached: a newer signed build for this device only, the inhibit hooks (Beryl: Home
+		# only; the other AP must not be down), signature, checksum, sysupgrade -T. Exit 75 = refused
+		# (busy, or another request in the last 15 min). This side adds the same 15-min limit, so a
+		# burst of presses doesn't even reach ghupdate. Every request is logged (logread -e ha-mqtt).
+		[ "$(cfg enabled)" = 1 ] || exit 0
+		remote_ok || { logger -t ha-mqtt "ghupdate has no remote-install: HA firmware installs stay off"; exit 0; }
+		[ -n "$(cfg host)" ] || { logger -t ha-mqtt "no broker host set"; exit 1; }
+		command -v mosquitto_sub >/dev/null || { logger -t ha-mqtt "mosquitto_sub not installed"; exit 1; }
+		write_opts
+		i=0; while [ -z "$(lan_ip)" ] && [ $i -lt 120 ]; do sleep 2; i=$((i + 2)); done
+		CMD="$TPREFIX/$NODE/firmware/install"; LAST=/tmp/ha-mqtt/last-install-request
+		logger -t ha-mqtt "listening for Home Assistant firmware installs on $CMD"
+		XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_sub -R -q 1 -t "$CMD" | while IFS= read -r msg; do
+			[ "$msg" = install ] || { logger -t ha-mqtt "ignored a firmware command with an unexpected payload"; continue; }
+			now=$(date +%s); last=$(cat "$LAST" 2>/dev/null || echo 0)
+			if [ $((now - last)) -lt 900 ]; then
+				logger -t ha-mqtt "Home Assistant install request ignored: at most one per 15 min"; continue
+			fi
+			ghupdate remote-install >/dev/null 2>&1; rc=$?
+			case $rc in
+				0) echo "$now" > "$LAST"; logger -t ha-mqtt "Home Assistant install request accepted by ghupdate (progress: logread -e ghupdate)" ;;
+				75) logger -t ha-mqtt "Home Assistant install request refused by ghupdate: busy or rate-limited (logread -e ghupdate)" ;;
+				*) logger -t ha-mqtt "Home Assistant install request: ghupdate remote-install failed (exit $rc)" ;;
+			esac
+			sleep 3; fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
+		done
+		logger -t ha-mqtt "firmware command subscription ended; procd restarts it"
+		exit 1
+		;;
+	*) echo "usage: ha-mqtt run | dry-run | listen" >&2; exit 2 ;;
 esac

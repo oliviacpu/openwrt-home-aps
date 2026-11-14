@@ -1,13 +1,21 @@
 #!/bin/sh
-# Shared roaming policy for every AP: hints only, ZERO forced disconnects.
-# - The installed usteer (2025.10.04~1d6524c6) hard-kicks 10 s after any roam trigger, so
-#   roam_scan_snr / roam_trigger_snr stay 0 there. Band steering only sends 802.11v requests.
-# - aggressiveness 1 (passive BSS-TM, never a kick) is ignored by that usteer and required by newer
-#   ones, whose default (3) kicks even for band steering.
-# Versioned: applied once per POLICY value, so local tuning survives later upgrades.
+# Shared roaming policy for every AP: hints only, ZERO forced disconnects. Chosen from the usteer that
+# is actually installed, and re-applied whenever that choice changes (so a fallback image can never
+# inherit thresholds the older usteer would kick on). Local tuning survives until then.
+# - Our source build of usteer (version ends in -r100, see build/usteer.sh): aggressiveness 1 sends
+#   802.11v BSS-TM suggestions only and never schedules a kick; its startup default is patched to 1
+#   as well. Polite roaming: below 20 dB SNR ask the client for 802.11k beacon reports (scan), below
+#   15 dB suggest a better AP.
+# - Any other usteer (the feed's 2025.10.04~1d6524c6) hard-kicks 10 s after any roam trigger:
+#   roam thresholds stay 0. Band steering there is 802.11v-only.
+# Both: min_snr 0 and load kick off (those always disconnect).
 # Runs at boot, before usteer starts. Doesn't touch whether usteer is enabled (the Beryl's Home/Away
 # switch owns that).
-POLICY=1
+v=$(sed -n '/^P:usteer$/,/^$/s/^V://p' /lib/apk/db/installed 2>/dev/null)
+case $v in
+	*-r100) POLICY=2 ;;
+	*) POLICY=1 ;;
+esac
 [ "$(uci -q get ghupdate.main.usteer_policy)" = "$POLICY" ] && exit 0
 uci -q get 'usteer.@usteer[0]' >/dev/null || exit 0
 S='usteer.@usteer[0]'
@@ -19,11 +27,17 @@ uci set "$S.aggressiveness=1"
 uci -q delete "$S.aggressiveness_mac_list"
 uci set "$S.min_snr=0"
 uci set "$S.load_kick_enabled=0"
-uci set "$S.roam_scan_snr=0"
-uci set "$S.roam_trigger_snr=0"
 uci set "$S.signal_diff_threshold=12"
 uci set "$S.band_steering_threshold=5"
+if [ "$POLICY" = 2 ]; then
+	uci set "$S.roam_scan_snr=20"
+	uci set "$S.roam_trigger_snr=15"
+else
+	uci set "$S.roam_scan_snr=0"
+	uci set "$S.roam_trigger_snr=0"
+fi
 uci commit usteer
 uci set ghupdate.main.usteer_policy="$POLICY"
 uci commit ghupdate
+logger -t usteer-policy "applied roaming policy $POLICY for usteer ${v:-?}"
 exit 0

@@ -1,0 +1,13 @@
+--- a/main.c
++++ b/main.c
+@@ -96,7 +96,9 @@
+ 	config.remote_update_interval = 1000;
+ 	config.initial_connect_delay = 0;
+ 	config.remote_node_timeout = 10;
+-	config.aggressiveness = 3;
++	/* home-aps: start passive (BSS-TM hints only, never a kick). A station seen before the first
++	 * set_config keeps the startup value for as long as it stays, so a kicking default would stick. */
++	config.aggressiveness = 1;
+ 	config.reassociation_delay = 30;
+ 
+ 	config.steer_reject_timeout = 60000;

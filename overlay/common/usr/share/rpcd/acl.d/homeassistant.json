@@ -1,100 +1,287 @@
 {
   "homeassistant": {
-    "description": "Home Assistant Integration",
+    "description": "Home Assistant integration (least privilege: no firmware, package or shell access)",
     "read": {
       "ubus": {
-        "system": ["info", "board", "logread", "upgrade"],
-        "log": ["read"],
-        "network": ["*"],
-        "network.*": ["*"],
-        "iwinfo": ["*"],
-        "file": ["*"],
-        "firewall": ["*"],
-        "rc": ["*"],
-        "service": ["*"],
-        "system": ["*"],
-        "uci": ["*"],
-        "session": ["*"],
-        "hostapd.*": ["*"],
-        "luci": ["*"],
-        "luci-rpc": ["*"],
-        "mwan3": ["status"],
-        "attendedsysupgrade": ["*"]
+        "system": [
+          "info",
+          "board"
+        ],
+        "log": [
+          "read"
+        ],
+        "network": [
+          "*"
+        ],
+        "network.*": [
+          "*"
+        ],
+        "iwinfo": [
+          "*"
+        ],
+        "file": [
+          "*"
+        ],
+        "firewall": [
+          "*"
+        ],
+        "rc": [
+          "*"
+        ],
+        "service": [
+          "*"
+        ],
+        "uci": [
+          "*"
+        ],
+        "session": [
+          "*"
+        ],
+        "hostapd.*": [
+          "*"
+        ],
+        "luci": [
+          "getMountPoints"
+        ],
+        "luci-rpc": [
+          "*"
+        ],
+        "mwan3": [
+          "status"
+        ]
       },
-      "uci": ["*"],
+      "uci": [
+        "*"
+      ],
       "file": {
-        "/etc/config/*": ["read", "stat"],
-        "/etc/passwd": ["read"],
-        "/etc/group": ["read"],
-        "/etc/shadow": ["read"],
-        "/etc/shells": ["read"],
-        "/usr/bin/iwinfo": ["read", "stat", "exec"],
-        "/usr/bin/etherwake": ["read", "stat", "exec"],
-        "/usr/bin/wg": ["read", "stat", "exec"],
-        "/usr/sbin/openvpn": ["read", "stat", "exec"],
-        "/usr/bin/id": ["read", "stat", "exec"],
-        "/bin/sh": ["read", "stat", "exec"],
-        "/bin/ash": ["read", "stat", "exec"],
-        "/bin/ls": ["read", "stat", "exec"],
-        "/sbin/apk": ["read", "stat", "exec"],
-        "/bin/opkg": ["read", "stat", "exec"],
-        "/sbin/logread": ["read", "stat"],
-        "/etc/presence/*": ["read", "stat"],
-        "/etc/init.d/presence_hostapd": ["read", "stat", "exec"],
-        "/usr/sbin/batctl": ["read", "stat", "exec"],
-        "/sys/module/batman_adv": ["read", "stat"],
-        "/bin/cat": ["read", "stat", "exec"],
-        "/bin/grep": ["read", "stat", "exec"],
-        "/usr/bin/awk": ["read", "stat", "exec"],
-        "/bin/df": ["read", "stat", "exec"],
-        "/sbin/ip": ["read", "stat", "exec"],
-        "/usr/sbin/ip": ["read", "stat", "exec"],
-        "/bin/ubus": ["read", "stat", "exec"],
-        "/bin/ping": ["read", "stat", "exec"],
-        "/usr/bin/ping": ["read", "stat", "exec"],
-        "/usr/bin/uptime": ["read", "stat", "exec"],
-        "/usr/bin/killall": ["read", "stat", "exec"],
-        "/bin/chmod": ["read", "stat", "exec"],
-        "/bin/mkdir": ["read", "stat", "exec"],
-        "/bin/rm": ["read", "stat", "exec"],
-        "/proc/stat": ["read"],
-        "/proc/meminfo": ["read"],
-        "/proc/net/arp": ["read"],
-        "/proc/*/net/arp": ["read"],
-        "/proc/net/dev": ["read"],
-        "/etc/init.d/snort": ["read", "stat", "exec"],
-        "/etc/init.d/banip": ["read", "stat", "exec"],
-        "/proc/sys/net/netfilter/nf_conntrack_count": ["read"],
-        "/proc/sys/net/netfilter/nf_conntrack_max": ["read"],
-        "/usr/bin/tail": ["read", "stat", "exec"],
-        "/usr/bin/wc": ["read", "stat", "exec"],
-        "/tmp/dhcp.leases": ["read"],
-        "/tmp/*": ["read", "stat"],
-        "/sys/class/thermal/*": ["read"]
+        "/etc/config/*": [
+          "read",
+          "stat"
+        ],
+        "/etc/passwd": [
+          "read"
+        ],
+        "/etc/group": [
+          "read"
+        ],
+        "/etc/shells": [
+          "read"
+        ],
+        "/usr/bin/iwinfo": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/etherwake": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/wg": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/sbin/openvpn": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/id": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/bin/ls": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/sbin/logread": [
+          "read",
+          "stat"
+        ],
+        "/etc/presence/*": [
+          "read",
+          "stat"
+        ],
+        "/etc/init.d/presence_hostapd": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/sbin/batctl": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/sys/module/batman_adv": [
+          "read",
+          "stat"
+        ],
+        "/bin/cat": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/bin/grep": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/awk": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/bin/df": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/sbin/ip": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/sbin/ip": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/bin/ubus": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/bin/ping": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/ping": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/uptime": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/killall": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/proc/stat": [
+          "read"
+        ],
+        "/proc/meminfo": [
+          "read"
+        ],
+        "/proc/net/arp": [
+          "read"
+        ],
+        "/proc/*/net/arp": [
+          "read"
+        ],
+        "/proc/net/dev": [
+          "read"
+        ],
+        "/etc/init.d/snort": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/etc/init.d/banip": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/proc/sys/net/netfilter/nf_conntrack_count": [
+          "read"
+        ],
+        "/proc/sys/net/netfilter/nf_conntrack_max": [
+          "read"
+        ],
+        "/usr/bin/tail": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/usr/bin/wc": [
+          "read",
+          "stat",
+          "exec"
+        ],
+        "/tmp/dhcp.leases": [
+          "read"
+        ],
+        "/tmp/*": [
+          "read",
+          "stat"
+        ],
+        "/sys/class/thermal/*": [
+          "read"
+        ]
       }
     },
     "write": {
       "ubus": {
-        "system": ["reboot", "upgrade"],
-        "network.interface": ["up", "down", "reconnect"],
-        "network": ["*"],
-        "firewall": ["*"],
-        "rc": ["*"],
-        "service": ["*"],
-        "uci": ["*"],
-        "file": ["exec"],
-        "hostapd.*": ["*"]
+        "system": [
+          "reboot"
+        ],
+        "network.interface": [
+          "up",
+          "down",
+          "reconnect"
+        ],
+        "network": [
+          "*"
+        ],
+        "firewall": [
+          "*"
+        ],
+        "rc": [
+          "*"
+        ],
+        "service": [
+          "*"
+        ],
+        "uci": [
+          "*"
+        ],
+        "file": [
+          "exec"
+        ],
+        "hostapd.*": [
+          "*"
+        ]
       },
-      "uci": ["*"],
+      "uci": [
+        "*"
+      ],
       "file": {
-        "/bin/sh": ["exec"],
-        "/bin/ash": ["exec"],
-        "/usr/bin/id": ["exec"],
-        "/sbin/apk": ["exec"],
-        "/bin/opkg": ["exec"],
-        "/tmp/*": ["read", "stat", "write"],
-        "/etc/presence/*": ["read", "stat", "write"],
-        "/etc/init.d/presence_hostapd": ["read", "stat", "write", "exec"]
+        "/usr/bin/id": [
+          "exec"
+        ],
+        "/tmp/*": [
+          "read",
+          "stat",
+          "write"
+        ],
+        "/etc/presence/*": [
+          "read",
+          "stat",
+          "write"
+        ],
+        "/etc/init.d/presence_hostapd": [
+          "read",
+          "stat",
+          "write",
+          "exec"
+        ]
       }
     }
   }

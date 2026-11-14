@@ -91,19 +91,34 @@ curl -fsSL "https://github.com/ohmyzsh/ohmyzsh/archive/$OMZ_COMMIT.tar.gz" | tar
 mkdir -p "$FILES/usr/share/oh-my-zsh"
 for p in lib tools custom oh-my-zsh.sh LICENSE.txt; do cp -a "$WORK/ohmyzsh-$OMZ_COMMIT/$p" "$FILES/usr/share/oh-my-zsh/"; done
 
+# ---------- 3b) usteer built from a pinned upstream commit (build/usteer.sh) ----------
+# Falls back to the feed's usteer if the SDK build fails; the image's 98-usteer-policy then keeps the
+# zero-kick settings, and publish's version gate refuses a release where the APs' usteer differ.
+USTEER_APK='' USTEER_PIN=feed
+if "$ROOT/build/usteer.sh" "$TARGET" "$V" "$OUT/usteer" > "$OUT/usteer.log" 2>&1; then
+	USTEER_APK=$(ls "$OUT"/usteer/usteer-[0-9]*.apk | head -n 1)
+	USTEER_PIN=$(cat "$ROOT/build/usteer.sh" "$ROOT"/build/usteer/patches/* | sha256sum | cut -c1-16)
+	echo "build[$PROFILE]: $(tail -n 1 "$OUT/usteer.log")"
+else
+	echo "build[$PROFILE]: WARNING usteer source build failed, using the feed's usteer (zero-kick policy):" >&2
+	tail -n 8 "$OUT/usteer.log" >&2
+fi
+IBMOUNTS=()
+[ -n "$USTEER_APK" ] && IBMOUNTS=(-v "$USTEER_APK:/builder/packages/${USTEER_APK##*/}:ro")
+
 # ---------- 4) devkey: what this device's image consists of ----------
 # Resolved package versions (Image Builder's dry run) + every file we add + the source pins. ghupdate
 # offers a release to a device only if its devkey differs from the installed one, so a change for
 # one AP never reflashes the other, while feed (security) updates still do.
 chmod -R a+rX "$FILES"
 mkdir -p "$WORK/bin"; chmod 0777 "$WORK/bin"
-ib() { docker run --rm --platform linux/amd64 -v "$FILES:/builder/files:ro" -v "$WORK/bin:/builder/bin" "$IB" "$@"; }
+ib() { docker run --rm --platform linux/amd64 ${IBMOUNTS[@]+"${IBMOUNTS[@]}"} -v "$FILES:/builder/files:ro" -v "$WORK/bin:/builder/bin" "$IB" "$@"; }
 ib make manifest PROFILE="$PROFILE" PACKAGES="$PACKAGES" STRIP_ABI=1 > "$WORK/manifest.raw" 2> "$OUT/manifest.log" \
 	|| { tail -30 "$OUT/manifest.log" >&2; die "image builder could not resolve the package set"; }
 grep -E '^[A-Za-z0-9._+-]+ - [^ ]+$' "$WORK/manifest.raw" | sort > "$WORK/manifest"
 [ -s "$WORK/manifest" ] || die "empty package manifest"
 DEVKEY=$( {
-	echo "openwrt $V $PROFILE posh $POSH_COMMIT omz $OMZ_COMMIT"
+	echo "openwrt $V $PROFILE posh $POSH_COMMIT omz $OMZ_COMMIT usteer $USTEER_PIN"
 	cat "$WORK/manifest"
 	(cd "$FILES" && find . -type f ! -path ./usr/bin/oh-my-posh ! -path ./etc/ghupdate/build | LC_ALL=C sort | xargs sha256sum)
 } | sha256sum | cut -c1-16)
