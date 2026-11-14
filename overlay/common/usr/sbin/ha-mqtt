@@ -90,7 +90,7 @@ lldp_neighbors() {  # every LLDP/CDP neighbour, "<name> <port> (<via>)" joined b
 }
 firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	command -v ghupdate >/dev/null 2>&1 || return
-	GHU_SERIAL=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
+	GHU_SERIAL= GHU_TAG=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
 	ST= UA= LS= LU= MSG= BLK=
 	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial' \
 		-e 'LU=@.latest.url' -e 'MSG=@.message' -e 'BLK=@.auto.blocked')"
@@ -100,7 +100,12 @@ firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
 	case "$ST" in ''|unknown) sum="Checking for updates" ;; esac   # just booted: ghupdate hasn't checked yet
 	sum=$(printf '%s' "$sum" | cut -c1-250)   # HA's release_summary limit is 255
-	# HA rejects the whole payload if release_url is null ("invalid url"), so leave it out when unknown.
+	# HA rejects the whole payload if release_url is null ("invalid url"). Before ghupdate's first
+	# check (just after boot) latest.url is empty: link the installed build's own release then, since
+	# omitting the key would leave HA showing the previous build's link.
+	if [ -z "$LU" ] && [ -n "${GHU_TAG:-}" ] && [ "$GHU_TAG" != unknown ]; then
+		repo=$(uci -q get ghupdate.main.repo); LU="https://github.com/${repo:-oliviacpu/openwrt-home-aps}/releases/tag/$GHU_TAG"
+	fi
 	url=; [ -n "$LU" ] && url=$(printf ',"release_url":"%s"' "$(esc "$LU")")
 	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","in_progress":%s%s,"release_summary":"%s"}\n' \
 		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$prog" "$url" "$(esc "$sum")"

@@ -40,15 +40,22 @@ jq -e 'type == "array"' >/dev/null 2>&1 <<<"$releases" || releases='[]'
 SERIAL=$(jq -r '[.[].tag_name | capture("-b(?<n>[0-9]+)$").n | tonumber] | (max // 0) + 1' <<<"$releases")
 EXISTING=$(jq -r --arg k "$KEY" '[.[] | select((.body // "") | contains("build-key: " + $k)) | .tag_name][0] // ""' <<<"$releases")
 
+# Weekly refresh: the OpenWrt package feeds get (security) updates without a new release or a repo
+# change, so the Sunday scheduled run rebuilds anyway. publish.sh then releases only if a device's
+# image actually changed (devkeys), so a quiet week costs one CI run and no reflash.
+REFRESH=false
+[ "${GITHUB_EVENT_NAME:-}" = schedule ] && [ "$(date -u +%u)" = 7 ] && REFRESH=true
+
 BUILD=true
-if [ -n "$EXISTING" ] && [ "$FORCE" != true ]; then
+if [ -n "$EXISTING" ] && [ "$FORCE" != true ] && [ "$REFRESH" != true ]; then
 	BUILD=false
-	note "OpenWrt $V with these inputs is already released as $EXISTING; nothing to do."
+	note "OpenWrt $V with these inputs is already released as $EXISTING; nothing to do (package updates are picked up by the Sunday rebuild)."
 elif [ "${#IB_MISSING[@]}" -gt 0 ]; then
 	BUILD=false
 	note "Image Builder for OpenWrt $V is not published yet for: ${IB_MISSING[*]}; will retry on the next run."
 else
-	note "Building OpenWrt $V as build $SERIAL for ${DEVICES[*]} (key $KEY)${EXISTING:+, forced}."
+	why=; [ -n "$EXISTING" ] && { [ "$REFRESH" = true ] && why=", weekly refresh for package updates" || why=", forced"; }
+	note "Building OpenWrt $V as build $SERIAL for ${DEVICES[*]} (key $KEY)$why."
 fi
 
 echo "version=$V"

@@ -41,7 +41,7 @@ services_for() {
 		/etc/init.d/beryl-exitgate start || true   # turns the exit node on once the uplink is clean
 		/etc/init.d/usteer stop || true            # roaming/steering is a home-network thing
 	else
-		/etc/init.d/beryl-exitgate stop || true    # also clears the exit node and its DNS
+		/etc/init.d/beryl-exitgate stop 2>/dev/null || true    # also clears the exit node and its DNS
 		tailscale set --exit-node= --accept-routes=false >/dev/null 2>&1 || true
 		uci set travelmate.global.trm_enabled=0; uci commit travelmate
 		/etc/init.d/travelmate stop || true; /etc/init.d/travelmate disable || true
@@ -55,7 +55,7 @@ switch_to() {
 	if [ "$target" = "$cur" ]; then
 		log "already in $cur"
 	else
-		if [ "$cur" = away ]; then /etc/init.d/beryl-exitgate stop || true; fi   # drop the exit node first
+		if [ "$cur" = away ]; then /etc/init.d/beryl-exitgate stop 2>/dev/null || true; fi   # drop the exit node first
 		mkdir -p "$D/$cur"
 		for f in $FILES; do cp "/etc/config/$f" "$D/$cur/$f"; done
 		for f in $FILES; do cp "$D/$target/$f" "/etc/config/$f"; done

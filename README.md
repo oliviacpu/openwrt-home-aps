@@ -106,8 +106,9 @@ Tags are `openwrt-<version>-b<build>`, one release for all devices. The build nu
 *latest* release.
 
 A run builds when OpenWrt publishes a new stable release or when anything under `overlay/`,
-`packages/`, `devices/`, `build/` or the workflow changes. It publishes only if at least one device's
-image actually changed. Publishing fails if a package shared by several devices resolved to different
+`packages/`, `devices/`, `build/` or the workflow changes, and every Sunday regardless, to pick up
+package (security) updates from the OpenWrt feeds. It publishes only if at least one device's image
+actually changed. Publishing fails if a package shared by several devices resolved to different
 versions (per-architecture feeds can lag; the next daily run retries). Run the workflow manually with
 *force* to rebuild and publish anyway.
 
