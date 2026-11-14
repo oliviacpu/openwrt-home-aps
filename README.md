@@ -39,7 +39,7 @@ reinstalled after an update:
 | `htop`, `tmux`, `nano`, `curl`, `iperf3`, `tcpdump-mini` | Everyday CLI |
 | `mtr-nojson`, `ethtool`, `drill` | Network diagnostics: per-hop loss, link/PoE port errors, DNS queries |
 | `lldpd` | Announces the AP to the switch via LLDP/CDP (name, IP, model, port) |
-| `usteer`, `luci-app-usteer` | Band steering and roaming coordination between APs on the same SSID |
+| `usteer`, `luci-app-usteer`, `wpad-mbedtls` | Band steering and roaming between APs on the same SSID; full hostapd for 802.11v (replaces `wpad-basic-mbedtls`) |
 | `prometheus-node-exporter-lua` (+ `-wifi`, `-wifi_stations`, `-hostapd_stations`) | Metrics at `http://<ap-address>:9100/metrics`, including per-client Wi-Fi signal/rates. Set to listen on LAN once, on first install. |
 
 Also included: a fix for NTP on dumb APs ([`95-resolv-for-jails`](overlay/etc/hotplug.d/iface/95-resolv-for-jails)).

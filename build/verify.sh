@@ -41,6 +41,7 @@ check "zsh + zoneinfo-america installed"    "grep -qx 'P:zsh' '$R/lib/apk/db/ins
 for p in htop tcpdump-mini iperf3 curl nano tmux mtr-nojson ethtool drill lldpd usteer luci-app-usteer prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi_stations; do
 	check "package $p installed"            "grep -qx 'P:$p' '$R/lib/apk/db/installed'"
 done
+check "full wpad (802.11v) replaces wpad-basic" "grep -qx 'P:wpad-mbedtls' '$R/lib/apk/db/installed' && ! grep -qx 'P:wpad-basic-mbedtls' '$R/lib/apk/db/installed'"
 check "one-time AP defaults script"         "test -x '$R/etc/uci-defaults/97-ap-defaults'"
 check "image fits the firmware partition"   "[ \$(stat -c %s '$img' 2>/dev/null || stat -f %z '$img') -lt 39845888 ]"
 
@@ -48,8 +49,9 @@ if [ -n "$OFFICIAL" ]; then
 	mkdir "$W/o"; tar -xf "$OFFICIAL" -C "$W/o"
 	unsquashfs -q -n -d "$W/o/r" "$W/o/sysupgrade-$PROFILE/root" lib/apk/db/installed >/dev/null
 	# Left out on purpose: OpenWrt's own Attended Sysupgrade tools would offer official images,
-	# which lack the preinit fix. ghupdate is this device's updater.
-	excluded='^P:(attendedsysupgrade-common|luci-app-attendedsysupgrade|owut|rpcd-mod-rpcsys|ucode-mod-uclient)$'
+	# which lack the preinit fix (ghupdate is this device's updater); wpad-basic-mbedtls is
+	# replaced by the full wpad-mbedtls (802.11v for roaming).
+	excluded='^P:(attendedsysupgrade-common|luci-app-attendedsysupgrade|owut|rpcd-mod-rpcsys|ucode-mod-uclient|wpad-basic-mbedtls)$'
 	missing=$(comm -23 <(grep '^P:' "$W/o/r/lib/apk/db/installed" | grep -vE "$excluded" | sort -u) \
 	                   <(grep '^P:' "$R/lib/apk/db/installed" | sort -u) | tr '\n' ' ')
 	check "every official package is included, except Attended Sysupgrade${missing:+ (missing: $missing)}" "[ -z '$missing' ]"

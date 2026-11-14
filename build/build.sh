@@ -19,6 +19,7 @@ PACKAGES="$PACKAGES zsh zoneinfo-america"                          # shell and f
 PACKAGES="$PACKAGES htop tcpdump-mini iperf3 curl nano tmux"       # everyday CLI tools
 PACKAGES="$PACKAGES mtr-nojson ethtool drill lldpd"                # network diagnostics; LLDP to the switch
 PACKAGES="$PACKAGES usteer luci-app-usteer"                        # band steering / roaming between APs
+PACKAGES="$PACKAGES wpad-mbedtls -wpad-basic-mbedtls"             # full hostapd: 802.11v (bss_transition) for usteer
 PACKAGES="$PACKAGES prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi"
 PACKAGES="$PACKAGES prometheus-node-exporter-lua-wifi_stations prometheus-node-exporter-lua-hostapd_stations"
 die() { echo "build: $*" >&2; exit 1; }
