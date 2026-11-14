@@ -2,6 +2,8 @@
 # Join the existing LAN as a DHCP client instead of claiming OpenWrt's default 192.168.1.1
 # and serving DHCP/RA. Acts only on a fresh default config, so it never overrides choices
 # made later (uci-defaults run again after every sysupgrade).
+# The Beryl's Home/Away switch owns its network config once set up; never touch it then.
+[ -e /etc/beryl-mode/current ] && exit 0
 [ "$(uci -q get network.lan.proto)" = "static" ] && [ "$(uci -q get network.lan.ipaddr)" = "192.168.1.1" ] || exit 0
 
 uci set network.lan.proto='dhcp'

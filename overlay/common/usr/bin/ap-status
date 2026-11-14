@@ -1,18 +1,37 @@
 #!/bin/sh
-# ap-status: a login status card for an OpenWrt access point.
-# Shows firmware and update state, health, the wired uplink (LLDP), each radio, and usteer
-# roaming peers. Read-only, about half a second on a WAX214v2. zsh runs it on interactive
-# login (see /root/.zshrc). Run `ap-status` any time, or `ap-status --plain` for no color.
-# Colors are the "netgear" Oh My Posh palette (Dracula Pro Lincoln); icons need a Nerd Font.
+# ap-status: a login status card for an OpenWrt access point (any of them: the same file runs on
+# the Netgear and the Beryl). Shows firmware and update state, health, the uplink and its ports,
+# LLDP neighbours, each radio, Wi-Fi uplinks (Away mode), and usteer roaming peers.
+# Read-only, about half a second. zsh runs it on interactive login (see /root/.zshrc).
+# Run `ap-status` any time, or `ap-status --plain` for no color.
+#
+# Identity: $POSH_HOST, else /etc/ap-id, else the hostname. Colors: that id's palette in
+# ~/.config/oh-my-posh/hosts.omp.json (the same file the prompt uses), else Dracula defaults.
+# Icons need a Nerd Font.
+
+read -r host < /proc/sys/kernel/hostname
+id=${POSH_HOST:-$(cat /etc/ap-id 2>/dev/null)}
+[ -n "$id" ] || id=$(echo "$host" | tr 'A-Z' 'a-z')
 
 if [ "$1" = --plain ] || [ ! -t 1 ]; then
 	Y= P= O= C= K= G= R= D= X= HB= HF=
 else
+	# Palette: accent (header, highlights), on_accent (header text), path, git, node, time.
+	ACC='#bd93f9' ONA='#22212c' PTH='#9580ff' GIT='#ffca80' NOD='#80ffea' TIM='#ff80bf'
+	cfg=$HOME/.config/oh-my-posh/hosts.omp.json
+	[ -r "$cfg" ] && eval "$(jsonfilter -i "$cfg" -e "ACC=@.palettes.list['$id'].accent" \
+		-e "ONA=@.palettes.list['$id'].on_accent" -e "PTH=@.palettes.list['$id'].path" \
+		-e "GIT=@.palettes.list['$id'].git" -e "NOD=@.palettes.list['$id'].node" \
+		-e "TIM=@.palettes.list['$id'].time" 2>/dev/null)"
+	rgb() { # #rrggbb -> r;g;b
+		h=${1#\#}
+		echo "$((0x$(echo "$h" | cut -c1-2)));$((0x$(echo "$h" | cut -c3-4)));$((0x$(echo "$h" | cut -c5-6)))"
+	}
 	e=$(printf '\033')
-	Y="$e[38;2;255;255;128m" P="$e[38;2;149;128;255m" O="$e[38;2;255;202;128m"
-	C="$e[38;2;128;255;234m" K="$e[38;2;255;128;191m" G="$e[38;2;138;255;128m"
-	R="$e[38;2;255;149;128m" D="$e[2m" X="$e[0m"
-	HB="$e[48;2;255;255;128m$e[38;2;44;42;33m" HF="$e[38;2;255;255;128m"
+	Y="$e[38;2;$(rgb "$ACC")m" P="$e[38;2;$(rgb "$PTH")m" O="$e[38;2;$(rgb "$GIT")m"
+	C="$e[38;2;$(rgb "$NOD")m" K="$e[38;2;$(rgb "$TIM")m"
+	G="$e[38;2;138;255;128m" R="$e[38;2;255;149;128m" D="$e[2m" X="$e[0m"
+	HB="$e[48;2;$(rgb "$ACC")m$e[38;2;$(rgb "$ONA")m" HF=$Y
 fi
 i_router=$(printf '\363\260\221\251') i_clock=$(printf '\363\260\224\237')
 i_eth=$(printf '\363\260\210\200') i_wifi=$(printf '\363\260\226\251')
@@ -30,47 +49,87 @@ ago() { # seconds -> "3d 4h", "2h 5m", "7m"
 band() { # MHz -> band
 	if [ "$1" -lt 3000 ]; then echo 2.4 GHz; elif [ "$1" -lt 5925 ]; then echo 5 GHz; else echo 6 GHz; fi
 }
+speed() { # Mbit/s -> 1G, 2.5G, 100M
+	case $1 in 1000) echo 1G ;; 2500) echo 2.5G ;; 5000) echo 5G ;; 10000) echo 10G ;; '' | -1) echo "?" ;; *) echo "${1}M" ;; esac
+}
 plural() { [ "$1" = 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
 is_true() { [ "$1" = true ] || [ "$1" = 1 ]; }
+pct() { case $1 in '' | *[!0-9]*) return 1 ;; esac; [ "$1" -le 100 ]; }   # integer 0-100?
+celsius() { # millidegrees -> degrees, only if plausible (sensors read 0 until they're ready)
+	[ -n "$1" ] && [ "$1" -ge 10000 ] && [ "$1" -le 130000 ] && echo $(($1 / 1000))
+}
 
 # ---- identity
-read -r host < /proc/sys/kernel/hostname
 model=$(cat /tmp/sysinfo/model 2>/dev/null)
 . /etc/openwrt_release 2>/dev/null
 build=
 [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build && build=" build $GHU_SERIAL"
+mode=
+[ -r /etc/beryl-mode/current ] && read -r mode < /etc/beryl-mode/current && mode=" $dot $Y$mode mode$X"
 title="$Y$host$X $dot "
-[ -n "$POSH_HOST" ] || { POSH_HOST=$host title=; }   # the segment already shows the hostname
-echo "$HF$i_plr$HB$i_router $POSH_HOST $X$HF$i_pl$X $title$model $dot OpenWrt $DISTRIB_RELEASE$build"
+[ "$id" = "$(echo "$host" | tr 'A-Z' 'a-z')" ] && title=   # the segment already shows the name
+echo "$HF$i_plr$HB$i_router $id $X$HF$i_pl$X $title$model $dot OpenWrt $DISTRIB_RELEASE$build$mode"
 
-# ---- health
+# ---- health: uptime, load, memory, temperatures, fan, flash
 read -r up _ < /proc/uptime
 read -r l1 l5 l15 _ < /proc/loadavg
 while read -r k v _; do
 	case $k in MemTotal:) mt=$v ;; MemAvailable:) ma=$v ;; esac
 done < /proc/meminfo
-temp=0
-for t in /sys/class/hwmon/hwmon*/temp1_input; do
-	# mt7915 reads 0 (or near it) until its sensor is ready, so only trust 10-130 °C.
-	[ -r "$t" ] && read -r v < "$t" && [ "$v" -ge 10000 ] && [ "$v" -le 130000 ] && [ "$v" -gt "$temp" ] && temp=$v
+cpu= wifi= phy= fan=
+for z in /sys/class/thermal/thermal_zone*; do
+	[ -r "$z/temp" ] || continue
+	case $(cat "$z/type" 2>/dev/null) in *cpu*) read -r v < "$z/temp"; cpu=$(celsius "$v") ;; esac
 done
+for h in /sys/class/hwmon/hwmon*; do
+	n=$(cat "$h/name" 2>/dev/null) v=
+	[ -r "$h/temp1_input" ] && read -r v < "$h/temp1_input"
+	case $n in
+		mt79*_phy* | mt76*_phy*) t=$(celsius "$v"); [ -n "$t" ] && { [ -z "$wifi" ] || [ "$t" -gt "$wifi" ]; } && wifi=$t ;;
+		mdio*) phy=$(celsius "$v") ;;
+		pwmfan) [ -r "$h/fan1_input" ] && read -r fan < "$h/fan1_input" ;;
+	esac
+done
+temps=
+[ -n "$cpu" ] && temps="CPU $cpu°"
+[ -n "$wifi" ] && temps="$temps${temps:+ }Wi-Fi $wifi°"
+[ -n "$phy" ] && temps="$temps${temps:+ }PHY $phy°"
 free_k=$(df -k /overlay 2>/dev/null | awk 'NR == 2 { print $4 }')
 line="  $K$i_clock$X up $(ago "${up%.*}") $dot load $l1 $l5 $l15 $dot $P$i_mem$X $(((mt - ma) / 1024))/$((mt / 1024)) MB"
-[ "$temp" -gt 0 ] && line="$line $dot $O$i_temp$X $((temp / 1000))°C"
+[ -n "$temps" ] && line="$line $dot $O$i_temp$X $temps"
+if [ -n "$fan" ]; then
+	[ "$fan" -gt 0 ] && line="$line $dot fan $fan rpm" || line="$line $dot fan off"
+fi
 [ -n "$free_k" ] && line="$line $dot $C$i_disk$X $((free_k / 1024)) MB free"
 echo "$line"
 
-# ---- wired uplink
-IP=
-eval "$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e 'IP=@["ipv4-address"][0].address')"
-port=lan; [ -e /sys/class/net/$port ] || port=eth0
-speed=$(cat /sys/class/net/$port/speed 2>/dev/null) duplex=$(cat /sys/class/net/$port/duplex 2>/dev/null)
-case $speed in
-	1000) speed=1G ;; 2500) speed=2.5G ;; 10000) speed=10G ;; '' | -1) speed=down duplex= ;; *) speed=${speed}M ;;
-esac
-line="  $C$i_eth$X ${IP:-no address} $dot $speed $duplex"
+# ---- uplink: default route, physical ports, LLDP/CDP neighbours
+set -- $(ip -4 route list 0/0 2>/dev/null | head -n 1)
+dev= src= gw=
+while [ $# -gt 0 ]; do
+	case $1 in dev) dev=$2; shift ;; src) src=$2; shift ;; via) gw=$2; shift ;; esac
+	shift
+done
+if [ -n "$src" ]; then line="  $C$i_eth$X $src via $dev"; else line="  $R$i_warn$X ${R}no default route$X"; fi
+ports=
+for i in /sys/class/net/*; do
+	n=${i##*/}
+	# Physical wired ports only: skip virtual devices, radios, and a DSA switch's CPU conduit
+	# (the Netgear's eth0; its real port is "lan").
+	[ -e "$i/device" ] || continue
+	[ -e "$i/phy80211" ] && continue
+	[ -d "$i/dsa" ] && continue
+	if [ "$(cat "$i/operstate" 2>/dev/null)" = up ]; then
+		s=$(speed "$(cat "$i/speed" 2>/dev/null)")
+		[ "$(cat "$i/duplex" 2>/dev/null)" = half ] && s="$s half"
+	else
+		s=down
+	fi
+	ports="$ports${ports:+, }$n $s"
+done
+[ -n "$ports" ] && line="$line $dot $ports"
 if command -v lldpcli >/dev/null 2>&1; then
-	# Every neighbor, not just the last: plain bridges forward CDP, so besides the switch this AP
+	# Every neighbour, not just the last: plain bridges forward CDP, so besides the switch an AP
 	# also hears other APs through it (the Netgear hears "Beryl br-lan" via Silk).
 	n=$(lldpcli -f keyvalue show neighbors 2>/dev/null | awk -F= '
 		function flush() { if (name != "") out = out (out == "" ? "" : ", ") name " " port; name = port = "" }
@@ -80,35 +139,40 @@ if command -v lldpcli >/dev/null 2>&1; then
 fi
 echo "$line"
 
-# ---- radios (usteer supplies load and client counts when it's running)
+# ---- radios: access points (with usteer load and clients) and Wi-Fi uplinks (client mode)
 us=$(ubus call usteer local_info 2>/dev/null)
-for d in /sys/class/net/phy*-ap*; do
-	[ -e "$d" ] || continue
-	d=${d##*/}
-	CH= HT= TX= FREQ= SSID= load= n=
-	eval "$(ubus call iwinfo info "{\"device\":\"$d\"}" 2>/dev/null |
-		jsonfilter -e 'CH=@.channel' -e 'HT=@.htmode' -e 'TX=@.txpower' -e 'FREQ=@.frequency' -e 'SSID=@.ssid')"
+for i in /sys/class/net/*; do
+	[ -e "$i/phy80211" ] || continue
+	d=${i##*/}
+	MODE= CH= HT= TX= FREQ= SSID= SIG=
+	eval "$(ubus call iwinfo info "{\"device\":\"$d\"}" 2>/dev/null | jsonfilter -e 'MODE=@.mode' \
+		-e 'CH=@.channel' -e 'HT=@.htmode' -e 'TX=@.txpower' -e 'FREQ=@.frequency' -e 'SSID=@.ssid' -e 'SIG=@.signal')"
 	[ -n "$FREQ" ] || continue
-	if [ -n "$us" ]; then
-		load=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].load")
-		n=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].n_assoc")
-		# usteer derives load from the channel survey, which mt7915 sometimes reports as garbage
-		# (busy time > active time), giving loads like 913404%. Show it only when it's a real 0-100.
-		case $load in '' | *[!0-9]*) load= ;; *) [ "$load" -le 100 ] || load= ;; esac
-	fi
-	[ -n "$n" ] || n=$(ubus call iwinfo assoclist "{\"device\":\"$d\"}" 2>/dev/null | jsonfilter -e '@.results[*].mac' | wc -l)
-	line=$(printf '  %s%s%s %-7s %-6s %-5s %2s dBm' "$P" "$i_wifi" "$X" "$(band "$FREQ")" "ch $CH" "$HT" "$TX")
-	[ -n "$load" ] && line="$line $dot load $(printf '%2s' "$load")%"
-	echo "$line $dot $Y$(plural "$n" client)$X $D$SSID$X"
+	case $MODE in
+		Client)
+			echo "  $P$i_wifi$X uplink $Y$SSID$X $dot $(band "$FREQ") ch $CH $dot ${SIG:-?} dBm" ;;
+		Master)
+			load= n=
+			if [ -n "$us" ]; then
+				load=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].load")
+				n=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].n_assoc")
+				# usteer derives load from the channel survey, which mt7915 sometimes reports as
+				# garbage (busy time > active time), giving loads like 913404%. Only show 0-100.
+				pct "$load" || load=
+			fi
+			[ -n "$n" ] || n=$(ubus call iwinfo assoclist "{\"device\":\"$d\"}" 2>/dev/null | jsonfilter -e '@.results[*].mac' | wc -l)
+			line=$(printf '  %s%s%s %-7s %-6s %-5s %2s dBm' "$P" "$i_wifi" "$X" "$(band "$FREQ")" "ch $CH" "$HT" "$TX")
+			[ -n "$load" ] && line="$line $dot load $(printf '%2s' "$load")%"
+			echo "$line $dot $Y$(plural "$n" client)$X $D$SSID$X" ;;
+	esac
 done
 
-# ---- roaming peers seen by usteer
+# ---- roaming peers seen by usteer (it can list the same key twice; ubus allows duplicates)
 peers=$(ubus call usteer remote_info 2>/dev/null)
-# usteer can list the same peer key twice (ubus allows duplicate keys), hence sort -u.
 [ -n "$peers" ] && echo "$peers" | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | sort -u | while read -r key; do
 	F= N= L=
 	eval "$(echo "$peers" | jsonfilter -e "F=@['$key'].freq" -e "N=@['$key'].n_assoc" -e "L=@['$key'].load")"
-	case $L in '' | *[!0-9]*) L= ;; *) [ "$L" -le 100 ] || L= ;; esac
+	pct "$L" || L=
 	echo "  $C$i_peer$X peer $Y${key%%#*}$X $dot $(band "${F:-0}") $dot $Y$(plural "${N:-0}" client)$X${L:+ $dot load $L%}"
 done
 
