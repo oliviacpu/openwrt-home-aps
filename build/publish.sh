@@ -33,8 +33,13 @@ for d in "${DEVDIRS[@]}"; do
 done | sort > "$REL/allpkgs"
 drift=$(awk '{ v[$1] = v[$1] ? v[$1] : $2; if (v[$1] != $2) bad[$1] = 1; vers[$1] = vers[$1] " " $3 "=" $2 }
 	END { for (p in bad) print p ":" vers[p] }' "$REL/allpkgs" | sort)
+# LuCI (the web UI) may differ: its per-architecture feeds are rebuilt on different days and it changes
+# often, so it would rarely line up. It's listed in the release notes. Everything else must match.
+luci_drift=$(echo "$drift" | grep '^luci' || true)
+drift=$(echo "$drift" | grep -v '^luci' | grep . || true)
 [ -z "$drift" ] || die "shared packages resolved to different versions across devices (feed lag?); retry later:
 $drift"
+[ -z "$luci_drift" ] || note "LuCI differs across devices (allowed): $(echo "$luci_drift" | head -n 1)"
 
 # 2) Devkeys; skip if no device's image changed since the latest release.
 : > "$REL/devkeys"
@@ -87,6 +92,7 @@ Official OpenWrt $V packages from the upstream Image Builder, plus:
 - shared roaming policy (802.11k/v hints, zero forced disconnects), shell, status card and Home Assistant publisher
 
 A device only offers this release if its devkey differs from the installed build's.
+$( [ -z "$luci_drift" ] || printf '\nLuCI (web UI) versions differ between devices in this build (per-architecture feed timing); every other shared package is identical:\n```\n%s\n```\n' "$luci_drift")
 
 Upstream release notes: https://openwrt.org/releases/$SERIES/notes-$V
 

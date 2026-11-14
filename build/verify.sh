@@ -44,6 +44,7 @@ done
 
 # --- first-boot defaults
 check "DHCP-client LAN default (fresh installs only)" "test -f '$R/etc/uci-defaults/99-lan-dhcp' && grep -q '192.168.1.1' '$R/etc/uci-defaults/99-lan-dhcp'"
+check "LAN default leaves a Home/Away Beryl alone" "grep -q '/etc/beryl-mode/current' '$R/etc/uci-defaults/99-lan-dhcp'"
 check "dumb-AP NTP/DNS fix is executable"   "test -x '$R/etc/hotplug.d/iface/95-resolv-for-jails'"
 check "usteer policy: zero kicks, aggressiveness 1" "f='$R/etc/uci-defaults/98-usteer-policy'; grep -q 'aggressiveness=1' \"\$f\" && grep -q 'roam_scan_snr=0' \"\$f\" && grep -q 'roam_trigger_snr=0' \"\$f\" && grep -q 'min_snr=0' \"\$f\" && grep -q 'load_kick_enabled=0' \"\$f\""
 
@@ -63,12 +64,16 @@ check "ap-status login card, quiet login"   "test -x '$R/usr/bin/ap-status' && !
 check "ha-mqtt publisher + service present" "test -x '$R/usr/sbin/ha-mqtt' && test -x '$R/etc/init.d/ha-mqtt' && test -x '$R/etc/uci-defaults/94-ha-mqtt'"
 check "ha_mqtt ships disabled, no credentials" "grep -qxE \"[[:space:]]*option enabled '0'\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option host ''\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option username ''\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option password ''\" '$R/etc/config/ha_mqtt'"
 check "ha_mqtt node_id is $AP_ID"           "grep -qxE \"[[:space:]]*option node_id '$AP_ID'\" '$R/etc/config/ha_mqtt'"
-if installed snmpd-nossl; then
-	check "SNMP helpers present (until SNMP retires)" "test -x '$R/usr/sbin/ha-wifi' && test -x '$R/usr/sbin/ha-weaknames' && test -x '$R/usr/sbin/cpu-busy' && test -x '$R/etc/uci-defaults/95-ha-scripts'"
-fi
+check "SNMP retired: no snmpd, no SNMP helpers" "! grep -qE '^P:snmpd' '$DB' && ! test -e '$R/usr/sbin/ha-wifi' && ! test -e '$R/usr/sbin/ha-weaknames' && ! test -e '$R/usr/sbin/cpu-busy'"
+check "SNMP leftovers cleaned on upgrade"   "test -x '$R/etc/uci-defaults/95-snmp-retire'"
+check "kept /root/ swapped for the pushed files (image .zshrc wins)" "test -x '$R/etc/uci-defaults/92-root-keep'"
 if [ "$FACTORY_IMAGE" = 1 ]; then
 	check "factory image built"             "ls '$OUT'/*-'$PROFILE'-squashfs-factory.img >/dev/null 2>&1"
 fi
+
+# --- device-specific checks (devices/<profile>.verify)
+# shellcheck disable=SC1090
+[ -r "$ROOT/devices/$PROFILE.verify" ] && . "$ROOT/devices/$PROFILE.verify"
 
 # --- no secrets in what we add (repo overlays): keys, passwords, PSKs, usign secret keys, hashes
 secrets=$(grep -rInE "option (key|password|community|psk|auth_secret|secret) '[^']+'|PRIVATE KEY|^RWRTY|[$](1|5|6|p)[$][^:]+" \

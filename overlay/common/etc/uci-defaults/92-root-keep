@@ -1,0 +1,19 @@
+#!/bin/sh
+# The shell setup ships in the image (/root/.zshrc, Oh My Zsh, Oh My Posh). Keeping all of /root/
+# through /etc/sysupgrade.conf restores the old .zshrc over the image's on every flash, so image
+# updates to it never arrive. Keep only the per-site files the Mac pushes (prompt palette, iTerm2
+# integration), and put the image's .zshrc back once. SSH keys live in /etc/dropbear, unaffected.
+# Runs after every flash; does nothing once /root/ is no longer kept.
+C=/etc/sysupgrade.conf
+grep -qx /root/ "$C" || exit 0
+sed -i '\#^/root/$#d' "$C"
+for f in /root/.config/oh-my-posh/hosts.omp.json /root/.iterm2_shell_integration.zsh; do
+	grep -qx "$f" "$C" || echo "$f" >> "$C"
+done
+[ -f /rom/root/.zshrc ] && cp -p /rom/root/.zshrc /root/.zshrc
+rm -rf /root/.oh-my-zsh /root/.zcompdump-*
+if [ -x /usr/bin/oh-my-posh ] && [ -f /root/.local/bin/oh-my-posh ]; then
+	rm -f /root/.local/bin/oh-my-posh
+	rmdir /root/.local/bin /root/.local 2>/dev/null
+fi
+exit 0

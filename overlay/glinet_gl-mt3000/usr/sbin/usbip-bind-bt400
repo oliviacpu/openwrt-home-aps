@@ -1,0 +1,20 @@
+#!/bin/sh
+# Share the ASUS USB-BT400 Bluetooth dongle (USB ID 0b05:17cb) over USB/IP.
+# Finds the dongle by USB ID each run, so a different USB port still works.
+# Called by /etc/hotplug.d/usb/50-usbip-bt400 (at boot via coldplug, and on replug)
+# and again at the end of boot by /etc/rc.local. The packaged usbipd service listens
+# (IPv4 only, /etc/config/usbipd). monochrome (192.168.1.32) attaches it for
+# Home Assistant; firewall rules usbip_allow/usbip_reject limit port 3240 to it.
+VIDPID="0b05:17cb"
+grep -q '^usbip_host ' /proc/modules || modprobe usbip-host
+for d in /sys/bus/usb/devices/*; do
+	[ -f "$d/idVendor" ] || continue
+	[ "$(cat "$d/idVendor"):$(cat "$d/idProduct")" = "$VIDPID" ] || continue
+	busid="${d##*/}"
+	[ -e "/sys/bus/usb/drivers/usbip-host/$busid" ] && continue
+	if usbip bind -b "$busid"; then
+		logger -t usbip-bt400 "shared $VIDPID at bus id $busid"
+	else
+		logger -t usbip-bt400 "failed to share $VIDPID at bus id $busid"
+	fi
+done

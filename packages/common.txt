@@ -9,4 +9,3 @@ mtr-nojson ethtool drill lldpd           # diagnostics; LLDP/CDP to the switch
 usteer luci-app-usteer                   # roaming / band steering between the APs
 wpad-mbedtls -wpad-basic-mbedtls hostapd-utils  # full hostapd: 802.11k/v; hostapd_cli for roaming debugging
 mosquitto-client-nossl                   # MQTT (ha-mqtt publisher, HA install trigger)
-snmpd-nossl                              # TEMPORARY: until Home Assistant has moved off SNMP (Phase B2)

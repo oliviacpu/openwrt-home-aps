@@ -1,0 +1,44 @@
+#!/bin/sh
+# Runs after every flash. Enables the boot hook, and does a one-time cleanup when the Beryl moves
+# from its hand-built OpenWrt (owut era, 2026-11) to this image. Idempotent; on a fresh install
+# there's nothing to clean.
+C=/etc/sysupgrade.conf
+/etc/init.d/beryl-mode enable
+
+# 1) Files the image now ships but sysupgrade.conf still carries. A keep-settings flash restores every
+#    listed file onto the new overlay, where the old copy would shadow the image's version for good
+#    (e.g. an old beryl-mode without `boot`). So put the image's version back and stop carrying it.
+#    Only executables and shipped data under /usr, /etc/init.d and /etc/hotplug.d, never /etc/config.
+#    The list is read first, then edited.
+list=$(sed -e 's/[[:space:]]*#.*//' "$C" | grep -v '/$' | grep .)
+for f in $list; do
+	case "$f" in /usr/* | /etc/init.d/* | /etc/hotplug.d/*) ;; *) continue ;; esac
+	[ -f "/rom$f" ] || continue
+	cmp -s "/rom$f" "$f" || cp -p "/rom$f" "$f"
+	sed -i "\#^$f\$#d" "$C"
+done
+grep -qx /etc/beryl-mode/ "$C" || echo /etc/beryl-mode/ >> "$C"
+grep -qx /etc/tailscale/ "$C" || echo /etc/tailscale/ >> "$C"
+
+# 2) The shell is in the image now (/usr/share/oh-my-zsh, /usr/bin/oh-my-posh, the image's
+#    /root/.zshrc). Stop keeping all of /root/; keep only the two files the Mac pushes. The old
+#    per-user Oh My Zsh (14 MB) and hand-installed oh-my-posh (13 MB) go away.
+if grep -qx /root/ "$C"; then
+	sed -i '\#^/root/$#d' "$C"
+	for f in /root/.config/oh-my-posh/hosts.omp.json /root/.iterm2_shell_integration.zsh; do
+		grep -qx "$f" "$C" || echo "$f" >> "$C"
+	done
+fi
+if [ -d /root/.oh-my-zsh ] && [ -f /rom/root/.zshrc ]; then
+	rm -rf /root/.oh-my-zsh /root/.zcompdump-*
+	cp -p /rom/root/.zshrc /root/.zshrc
+fi
+if [ -x /usr/bin/oh-my-posh ] && [ -f /root/.local/bin/oh-my-posh ]; then
+	rm -f /root/.local/bin/oh-my-posh
+	rmdir /root/.local/bin /root/.local 2>/dev/null
+fi
+
+# 3) Boot-time mode handling moved from rc.local to /etc/init.d/beryl-mode.
+sed -i -e '\#^\# Revert to Home if an Away test was still pending when the box went down\.$#d' \
+	-e '\#^\[ -f /etc/beryl-mode/revert-at \] && /usr/sbin/beryl-mode home$#d' /etc/rc.local
+exit 0

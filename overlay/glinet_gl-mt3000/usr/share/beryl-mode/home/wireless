@@ -1,0 +1,43 @@
+# beryl-mode template (home). No passphrase in the image: every access point ships disabled.
+# The SSID is a placeholder too (the real one isn't published). `beryl-mode psk SSID < passphrase`
+# sets both and turns on the access points marked psk_pending.
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/soc/18000000.wifi'
+	option band '2g'
+	option channel '6'
+	option htmode 'HE20'
+	option country 'US'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt'
+	option encryption 'sae-mixed'
+	option ifname 'ap2g'
+	option isolate '0'
+	option ieee80211k '1'
+	option bss_transition '1'
+	option disabled '1'
+	option psk_pending '1'
+
+config wifi-device 'radio1'
+	option type 'mac80211'
+	option path 'platform/soc/18000000.wifi+1'
+	option band '5g'
+	option channel '36'
+	option htmode 'HE80'
+	option country 'US'
+
+config wifi-iface 'default_radio1'
+	option device 'radio1'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'OpenWrt'
+	option encryption 'sae-mixed'
+	option ifname 'ap5g'
+	option ieee80211k '1'
+	option bss_transition '1'
+	option disabled '1'
+

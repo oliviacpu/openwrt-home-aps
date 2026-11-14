@@ -1,0 +1,5 @@
+
+config server 'main'
+	option enable '1'
+	option ipv4 '1'
+	option ipv6 '0'

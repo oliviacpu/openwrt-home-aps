@@ -1,9 +1,0 @@
-#!/bin/sh
-# The Home Assistant helper scripts (ha-wifi, ha-weaknames, cpu-busy) and the rpcd ACL for the
-# homeassistant login now ship in the image.
-# Stop carrying copies through /etc/sysupgrade.conf, so the image version wins from the next
-# upgrade on. Only drops an entry when the image really contains that file.
-for f in /usr/sbin/ha-wifi /usr/sbin/ha-weaknames /usr/sbin/cpu-busy /usr/share/rpcd/acl.d/homeassistant.json; do
-	[ -e "/rom$f" ] && sed -i "\#^$f\$#d" /etc/sysupgrade.conf
-done
-exit 0

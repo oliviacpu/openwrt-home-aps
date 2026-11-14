@@ -166,11 +166,13 @@ openwrt_version|OpenWrt version||||mdi:package-variant'
 # Their retained discovery configs are cleared at startup, which removes the stale entities in HA.
 RETIRED='sensor/weak_clients sensor/firmware'
 
-discovery() {  # prints "topic<TAB>payload" lines
+lan_ip() { ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null; }
+discovery() {  # prints "topic<TAB>payload" lines; uses $LANIP (may be empty: then no configuration_url,
+	# which HA would reject as "http:///" and drop the whole discovery message)
 	model=$(cat /tmp/sysinfo/model 2>/dev/null)
-	lanip=$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address')
-	dev=$(printf '{"identifiers":["openwrt_ap_%s"],"name":"%s","model":"%s","manufacturer":"%s","sw_version":"%s","configuration_url":"http://%s/"}' \
-		"$NODE" "$(esc "$NAME")" "$(esc "$model")" "$(esc "${model%% *}")" "$(. /etc/openwrt_release; esc "OpenWrt $DISTRIB_RELEASE")" "$(esc "$lanip")")
+	url=; [ -n "$LANIP" ] && url=$(printf ',"configuration_url":"http://%s/"' "$(esc "$LANIP")")
+	dev=$(printf '{"identifiers":["openwrt_ap_%s"],"name":"%s","model":"%s","manufacturer":"%s","sw_version":"%s"%s}' \
+		"$NODE" "$(esc "$NAME")" "$(esc "$model")" "$(esc "${model%% *}")" "$(. /etc/openwrt_release; esc "OpenWrt $DISTRIB_RELEASE")" "$url")
 	echo "$SENSORS" | while IFS='|' read -r key name unit dclass sclass icon; do
 		extra=
 		[ -n "$unit" ] && extra="$extra,\"unit_of_measurement\":\"$unit\""
@@ -207,6 +209,7 @@ write_opts() {  # broker options live in a 0600 file, never on the command line 
 
 case "${1:-run}" in
 	dry-run)
+		LANIP=$(lan_ip)
 		discovery | sed 's/\t/  /'
 		for k in $RETIRED; do echo "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config  (cleared)"; done
 		echo "$STATE_TOPIC  $(state)"
@@ -217,14 +220,34 @@ case "${1:-run}" in
 		[ -n "$(cfg host)" ] || { logger -t ha-mqtt "no broker host set"; exit 1; }
 		command -v mosquitto_pub >/dev/null || { logger -t ha-mqtt "mosquitto_pub not installed"; exit 1; }
 		write_opts
-		for k in $RETIRED; do clear_retained "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config"; done
-		n=0
+		# At boot this starts before DHCP has given the LAN an address: wait for one (up to 2 min).
+		i=0; while [ -z "$(lan_ip)" ] && [ $i -lt 120 ]; do sleep 2; i=$((i + 2)); done
+		# Discovery and the retired-topic clears are (re)done until they've fully reached the broker:
+		# at start, whenever the LAN address changes, and every 30 cycles. Each cycle publishes the
+		# state first, and touches discovery only if that worked, so an unreachable broker (e.g. Away
+		# without the tailnet) costs one failed connection per cycle, not dozens.
+		n=0; announced=; need_announce=1; need_clear=1; up=1
 		while :; do
-			if [ $((n % 60)) -eq 0 ]; then  # (re)announce discovery at start and every 60 cycles
-				discovery | while IFS="$(printf '\t')" read -r t p; do pub "$t" "$p" retain; done
+			LANIP=$(lan_ip)
+			[ "$LANIP" = "$announced" ] || need_announce=1
+			[ $((n % 30)) -eq 0 ] && need_announce=1
+			if pub "$STATE_TOPIC" "$(state)"; then
+				[ "$up" = 1 ] || logger -t ha-mqtt "broker reachable again"
+				up=1
+				if [ "$need_clear" = 1 ]; then
+					need_clear=0
+					for k in $RETIRED; do clear_retained "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config" || need_clear=1; done
+				fi
+				if [ "$need_announce" = 1 ]; then
+					fails=$(discovery | while IFS="$(printf '\t')" read -r t p; do pub "$t" "$p" retain || echo x; done | wc -l)
+					if [ "$fails" -eq 0 ]; then need_announce=0; announced=$LANIP
+					else logger -t ha-mqtt "$fails discovery messages failed; retrying next cycle"; fi
+				fi
+				fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
+			else
+				[ "$up" = 0 ] || logger -t ha-mqtt "publish to the broker failed; retrying every cycle"
+				up=0
 			fi
-			pub "$STATE_TOPIC" "$(state)" || logger -t ha-mqtt "publish failed"
-			fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
 			n=$((n + 1)); sleep "$INTERVAL"
 		done
 		;;

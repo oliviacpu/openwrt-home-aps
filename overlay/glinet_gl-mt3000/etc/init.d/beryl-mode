@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# End of boot: finish a pending Away-test revert, or restart the current mode's services
+# (Away: travelmate + the exit-node gate, usteer off; Home: usteer on, travelmate off).
+# Phase 5 will read the side switch here instead.
+START=99
+
+boot() {
+	/usr/sbin/beryl-mode boot
+}
+
+start() {
+	return 0
+}

@@ -1,4 +1,0 @@
-#!/bin/sh
-# Wi-Fi stations this access point hears below -70 dBm, weakest first, as "MAC=dBm,MAC=dBm",
-# for Home Assistant (snmpd extend "weaknames"). The logic lives in ha-wifi.
-exec /usr/sbin/ha-wifi weaknames

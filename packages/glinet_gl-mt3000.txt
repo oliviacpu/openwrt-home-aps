@@ -1,0 +1,6 @@
+# GL.iNet GL-MT3000 (Beryl) extras on top of packages/common.txt.
+# Away mode: Tailscale (exit node via monochrome, tailnet management in both modes) and travelmate
+# (hotel Wi-Fi uplinks, captive portals). Travel-router only: a fixed AP has no use for them.
+tailscale travelmate luci-app-travelmate
+# Home: the ASUS BT400 Bluetooth dongle is shared with monochrome over USB/IP (HA's Sonicare link).
+usbip-server usbip-client kmod-usbip-server

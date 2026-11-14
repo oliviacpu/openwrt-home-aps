@@ -1,0 +1,132 @@
+#!/bin/sh
+# beryl-mode: switch the Beryl between Home (access point under the dresser) and Away (travel router).
+#
+#   beryl-mode status
+#   beryl-mode home | away [--revert-after SECONDS]
+#   beryl-mode confirm            # cancel a pending automatic revert
+#   beryl-mode boot               # /etc/init.d/beryl-mode, end of boot (see below)
+#   beryl-mode psk [SSID] < passphrase   # fresh install: Wi-Fi passphrase (stdin only) + SSID
+#
+# Each mode has its own copy of network, wireless, dhcp and firewall in /etc/beryl-mode/<mode>/.
+# Switching first saves the live files into the outgoing mode's folder, so edits made in LuCI stay
+# with the mode they were made in. Then it copies the incoming mode's files into /etc/config.
+# Copies, not symlinks.
+# --revert-after starts a timer that switches back to Home unless `beryl-mode confirm` runs first.
+# At the end of boot, /etc/init.d/beryl-mode runs `beryl-mode boot`: it reverts to Home if a timer was
+# pending when the box went down, and otherwise restarts the current mode's services, so a reboot in
+# Away keeps the exit-node gate (and keeps usteer off).
+set -eu
+D=/etc/beryl-mode
+FILES="network wireless dhcp firewall"
+log() { logger -t beryl-mode "$*"; echo "$*"; }
+cur=$(cat "$D/current" 2>/dev/null || echo home)
+
+# Cancel a pending revert timer. BusyBox `sh -c "sleep N; ... beryl-mode home"` EXECs its last
+# command, so when the timer fires, this script IS the process in the pidfile. Killing that PID
+# would kill ourselves mid-switch, so skip it. That bug defeated both safety nets on 2026-11-13.
+cancel_timer() {
+	pf=/var/run/beryl-mode-revert.pid
+	if [ -f "$pf" ]; then
+		p=$(cat "$pf")
+		[ "$p" = "$$" ] || kill "$p" 2>/dev/null || true
+		rm -f "$pf"
+	fi
+}
+
+services_for() {
+	if [ "$1" = away ]; then
+		# Service calls must not abort a half-done switch (set -e), hence "|| true".
+		uci set travelmate.global.trm_enabled=1; uci commit travelmate
+		/etc/init.d/travelmate enable || true; /etc/init.d/travelmate restart || true
+		/etc/init.d/beryl-exitgate start || true   # turns the exit node on once the uplink is clean
+		/etc/init.d/usteer stop || true            # roaming/steering is a home-network thing
+	else
+		/etc/init.d/beryl-exitgate stop || true    # also clears the exit node and its DNS
+		tailscale set --exit-node= --accept-routes=false >/dev/null 2>&1 || true
+		uci set travelmate.global.trm_enabled=0; uci commit travelmate
+		/etc/init.d/travelmate stop || true; /etc/init.d/travelmate disable || true
+		/etc/init.d/usteer start || true           # rejoin the Netgear for roaming (802.11k)
+	fi
+}
+
+switch_to() {
+	target=$1
+	for f in $FILES; do [ -s "$D/$target/$f" ] || { log "missing $D/$target/$f, not switching"; exit 1; }; done
+	if [ "$target" = "$cur" ]; then
+		log "already in $cur"
+	else
+		if [ "$cur" = away ]; then /etc/init.d/beryl-exitgate stop || true; fi   # drop the exit node first
+		mkdir -p "$D/$cur"
+		for f in $FILES; do cp "/etc/config/$f" "$D/$cur/$f"; done
+		for f in $FILES; do cp "$D/$target/$f" "/etc/config/$f"; done
+		echo "$target" > "$D/current"
+		log "switching $cur -> $target"
+		/etc/init.d/network restart
+		/etc/init.d/firewall restart >/dev/null 2>&1
+		/etc/init.d/dnsmasq restart; /etc/init.d/odhcpd restart
+	fi
+	services_for "$target"
+	log "mode: $target"
+}
+
+case "${1:-status}" in
+	status)
+		echo "mode: $cur"
+		[ -f "$D/revert-at" ] && echo "revert to home pending at $(date -d "@$(cat "$D/revert-at")" 2>/dev/null || cat "$D/revert-at")"
+		tailscale status --json 2>/dev/null | jsonfilter -e '@.ExitNodeStatus.ID' >/dev/null 2>&1 && echo "exit node: on" || echo "exit node: off"
+		;;
+	confirm)
+		cancel_timer; rm -f "$D/revert-at"; log "revert cancelled; staying in $cur" ;;
+	home|away)
+		target=$1; shift
+		cancel_timer
+		newrevert=0
+		if [ "${1:-}" = "--revert-after" ] && [ -n "${2:-}" ]; then
+			newrevert=1
+			echo $(( $(date +%s) + $2 )) > "$D/revert-at"
+			start-stop-daemon -S -b -m -p /var/run/beryl-mode-revert.pid -x /bin/sh -- -c \
+				"sleep $2; [ -f $D/revert-at ] && /usr/sbin/beryl-mode home"
+			log "will revert to home in $2 s unless 'beryl-mode confirm'"
+		fi
+		switch_to "$target"
+		# Only now that the switch worked: drop the boot-time revert marker (unless we just armed
+		# a new one). If anything above failed, set -e exits first and the marker stays.
+		[ "$newrevert" = 1 ] || rm -f "$D/revert-at"
+		;;
+	boot)
+		rm -f /var/run/beryl-mode-revert.pid   # a timer from before the reboot is gone
+		if [ -f "$D/revert-at" ]; then
+			log "boot: an Away test was pending when the box went down, reverting to home"
+			switch_to home; rm -f "$D/revert-at"
+		else
+			services_for "$cur"; log "boot: mode $cur"
+		fi
+		;;
+	psk)
+		# Fresh install: set the Wi-Fi passphrase (stdin only, never argv: `ps` shows argv) and, if
+		# given, the SSID (`beryl-mode psk [SSID] < passphrase`), on every access point in the live
+		# config and in both modes. Turns on the ones the PSK-free templates left off (psk_pending).
+		# The passphrase goes to uci on stdin (uci batch), and is never logged.
+		ssid=${2:-}
+		[ -z "$ssid" ] || [ ${#ssid} -le 32 ] || { echo "SSID must be 1-32 characters" >&2; exit 1; }
+		IFS= read -r k || true
+		n=${#k}
+		[ "$n" -ge 8 ] && [ "$n" -le 63 ] || { echo "passphrase must be 8-63 characters (got $n)" >&2; exit 1; }
+		q() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }   # for uci batch's shell-style '...' quoting
+		for c in /etc/config "$D/home" "$D/away"; do
+			[ -s "$c/wireless" ] || continue
+			for s in $(uci -c "$c" show wireless | sed -n "s/^wireless\.\([^.]*\)=wifi-iface\$/\1/p"); do
+				[ "$(uci -c "$c" -q get "wireless.$s.mode")" = ap ] || continue
+				printf "set wireless.%s.key='%s'\n" "$s" "$(q "$k")" | uci -c "$c" batch
+				[ -n "$ssid" ] && uci -c "$c" set "wireless.$s.ssid=$ssid"
+				if [ "$(uci -c "$c" -q get "wireless.$s.psk_pending")" = 1 ]; then
+					uci -c "$c" set "wireless.$s.disabled=0"; uci -c "$c" delete "wireless.$s.psk_pending"
+				fi
+			done
+			uci -c "$c" commit wireless
+		done
+		log "Wi-Fi passphrase ($n characters)${ssid:+ and SSID} set in the live config and both modes"
+		wifi up
+		;;
+	*) echo "usage: beryl-mode status | home | away [--revert-after SECONDS] | confirm | boot | psk [SSID]" >&2; exit 2 ;;
+esac

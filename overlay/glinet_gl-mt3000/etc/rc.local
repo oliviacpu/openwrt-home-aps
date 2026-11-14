@@ -1,0 +1,8 @@
+# Put your custom commands here that should be executed once
+# the system init finished. By default this file does nothing.
+
+# Offer the ASUS BT400 Bluetooth dongle to monochrome over USB/IP (Home Assistant's Sonicare link).
+# /etc/hotplug.d/usb/50-usbip-bt400 handles replugs; this covers boot.
+/usr/sbin/usbip-bind-bt400
+
+exit 0

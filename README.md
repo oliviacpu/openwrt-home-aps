@@ -59,7 +59,6 @@ build/publish.sh           all devices: version-drift gate, SHA256SUMS, usign si
 | Oh My Posh, Oh My Zsh (core), `/root/.zshrc`, `ap-status` | Root logs in to zsh with an Oh My Posh prompt and a status card (firmware, health, LLDP uplink, radios, roaming peers). Oh My Posh is built from a pinned upstream tag for each device's architecture; Oh My Zsh is a pinned commit, core only. The prompt's host name comes from `/etc/ap-id`. |
 | `luci-mod-rpc`, `mosquitto-client-nossl` | Home Assistant: the LuCI JSON-RPC endpoint used by HA's OpenWrt integration, and the MQTT client for `ha-mqtt` |
 | `ha-mqtt` (+ `/etc/config/ha_mqtt`) | Publishes AP health to Home Assistant via MQTT discovery (firmware update, temperatures, channel load/noise, clients, tx retries/drops, roams, weak clients, uplink). Ships **disabled with no broker credentials**; set them on the device only (`/etc/config/ha_mqtt` is kept across updates). |
-| `snmpd-nossl`, `ha-wifi`/`ha-weaknames`/`cpu-busy` | Legacy SNMP sensors for Home Assistant, **being retired** in favour of `ha-mqtt`. Its config stays on the device and is never in this repo. |
 
 Also included: a fix for NTP on dumb APs ([`95-resolv-for-jails`](overlay/common/etc/hotplug.d/iface/95-resolv-for-jails)).
 With dnsmasq off, the sandboxed `sysntpd` can't follow the `/tmp/resolv.conf` symlink and never sets

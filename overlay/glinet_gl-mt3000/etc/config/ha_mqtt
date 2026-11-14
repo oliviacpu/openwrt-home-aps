@@ -1,0 +1,15 @@
+
+# /usr/sbin/ha-mqtt settings. Ships disabled with no credentials: fill these in on the device only
+# (never in a public repo), then: /etc/init.d/ha-mqtt enable; /etc/init.d/ha-mqtt restart
+config ha_mqtt 'main'
+	option enabled '0'
+	option host ''
+	option port '1883'
+	option username ''
+	option password ''
+	option interval '60'
+	# Device name in Home Assistant and the id used in entity ids (default: from the hostname).
+	option name 'Beryl'
+	option node_id 'beryl'
+	option discovery_prefix 'homeassistant'
+	option topic_prefix 'openwrt-ap'

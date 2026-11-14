@@ -1,0 +1,12 @@
+#!/bin/sh
+# ghupdate inhibit hook (Beryl): exit 0 (and print why) to block automatic and HA-triggered installs.
+# The Beryl installs updates only at home: Home mode, no Away test pending, and the default route via
+# the home router on the LAN, so it never flashes over hotel Wi-Fi. (Phase 5 will also require the
+# side switch to read Home.) A local "Install now" in LuCI isn't blocked by hooks.
+m=$(cat /etc/beryl-mode/current 2>/dev/null || echo home)
+[ "$m" = home ] || { echo "the Beryl is in $m mode; it installs updates only at home"; exit 0; }
+[ -f /etc/beryl-mode/revert-at ] && { echo "an Away test is pending (beryl-mode revert timer)"; exit 0; }
+# "default via 192.168.1.1 dev br-lan ..."
+set -- $(ip -4 route show default 2>/dev/null | head -n 1)
+[ "${3:-}" = 192.168.1.1 ] && [ "${5:-}" = br-lan ] || { echo "the default route isn't via the home router on the LAN (${*:-none})"; exit 0; }
+exit 1

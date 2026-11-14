@@ -1,0 +1,23 @@
+# Beryl-only checks, sourced by build/verify.sh (uses check, installed, $R = unpacked rootfs, $W = temp).
+# check() evals its second argument in verify.sh's shell: escape $ for anything evaluated later, and
+# never `exit` outside a ( subshell ).
+T=$R/usr/share/beryl-mode
+code() { grep -v '^[[:space:]]*#' "$1"; }   # a file without its comments
+for m in home away; do
+	check "beryl-mode $m template complete" "(for f in network wireless dhcp firewall; do test -s '$T/$m/'\$f || exit 1; done)"
+	check "beryl-mode $m template: no Wi-Fi key" "! grep -qE 'option (key|sae_password) ' '$T/$m/wireless'"
+	check "beryl-mode $m template: every AP ships disabled" "! awk '/^config/ { if (i && !off) bad = 1; i = (\$2 == \"wifi-iface\"); off = 0 } i && /option disabled .1./ { off = 1 } END { if (i && !off) bad = 1; exit !bad }' '$T/$m/wireless'"
+	check "beryl-mode $m template: placeholder SSID only" "! grep -E 'option ssid' '$T/$m/wireless' | grep -qv \"'OpenWrt'\""
+	check "beryl-mode $m template: no MAC addresses" "! grep -qiE '([0-9a-f]{2}:){5}[0-9a-f]{2}' '$T/$m/network' '$T/$m/wireless'"
+done
+# Home must never serve DHCP or IPv6 RA onto the home LAN.
+check "Home: no DHCP, DHCPv6 or RA on lan" "awk '/^config dhcp .lan./ { s = 1; next } /^config/ { s = 0 } s' '$T/home/dhcp' > \"\$W/hd\" && grep -q \"option ignore '1'\" \"\$W/hd\" && grep -q \"option ra 'disabled'\" \"\$W/hd\" && grep -q \"option dhcpv6 'disabled'\" \"\$W/hd\""
+check "Home: lan is a DHCP client, no wan" "code '$T/home/network' | grep -q \"option proto 'dhcp'\" && ! code '$T/home/network' | grep -q \"^config interface 'wan'\""
+check "Away: eth1 in no network" "! code '$T/away/network' | grep -q eth1"
+for f in etc/uci-defaults/90-beryl-mode etc/uci-defaults/91-beryl-migrate etc/ghupdate/inhibit.d/40-away \
+	etc/init.d/beryl-mode etc/init.d/beryl-exitgate usr/sbin/beryl-mode usr/sbin/beryl-exitgate usr/sbin/usbip-bind-bt400; do
+	check "$f executable" "test -x '$R/$f'"
+done
+check "beryl-exitgate not started at boot (beryl-mode owns it)" "! ls '$R'/etc/rc.d/*beryl-exitgate >/dev/null 2>&1"
+check "91-beryl-migrate never touches /etc/config" "! code '$R/etc/uci-defaults/91-beryl-migrate' | grep -q '/etc/config'"
+check "fan driver present (HA fan sensor)" "installed kmod-hwmon-pwmfan"

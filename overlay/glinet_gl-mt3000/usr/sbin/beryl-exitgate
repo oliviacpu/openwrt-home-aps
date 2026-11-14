@@ -1,0 +1,57 @@
+#!/bin/sh
+# Away-mode exit-node gate (run by /etc/init.d/beryl-exitgate; procd restarts it).
+#
+# Every 30 s:
+#   uplink clean = an HTTP probe sent out the raw uplink returns 204. A captive portal answers
+#                  with its login page instead. The probe binds to the uplink interface, so it
+#                  bypasses the exit node, which also carries the router's own traffic once on.
+#   tailnet ok   = tailscaled is Running and monochrome is online.
+# Both ok: the exit node is monochrome, home routes are accepted, and DNS goes to Pi-hole (.32)
+# through the tunnel.
+# Otherwise: no exit node, and DNS goes to the uplink's own servers, so a hotel login page is
+# always reachable and a dead tunnel never strands the travel LAN.
+# DNS switching rewrites /tmp/beryl-resolv.conf, which dnsmasq (resolvfile in Away's dhcp
+# config) re-reads on change.
+EXIT=monochrome
+PIHOLE=192.168.1.32
+PROBE=http://connectivitycheck.gstatic.com/generate_204
+RESOLV=/tmp/beryl-resolv.conf
+log() { logger -t beryl-exitgate "$*"; }
+
+uplink_dev() { ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit }}'; }
+uplink_clean() {
+	dev=$(uplink_dev); [ -n "$dev" ] || return 1
+	[ "$(curl -s -o /dev/null -w '%{http_code}' --interface "$dev" --max-time 6 "$PROBE" 2>/dev/null)" = 204 ]
+}
+tailnet_ok() {
+	st=$(tailscale status --json 2>/dev/null) || return 1
+	[ "$(echo "$st" | jsonfilter -e '@.BackendState' 2>/dev/null)" = Running ] || return 1
+	[ "$(echo "$st" | jsonfilter -e "@.Peer[@.HostName=\"$EXIT\"].Online" 2>/dev/null)" = true ]
+}
+exit_on() { tailscale status --json 2>/dev/null | jsonfilter -e '@.ExitNodeStatus.ID' >/dev/null 2>&1; }
+dns_uplink() {
+	cmp -s /tmp/resolv.conf.d/resolv.conf.auto "$RESOLV" 2>/dev/null || cp /tmp/resolv.conf.d/resolv.conf.auto "$RESOLV" 2>/dev/null || : > "$RESOLV"
+}
+dns_pihole() { [ "$(cat "$RESOLV" 2>/dev/null)" = "nameserver $PIHOLE" ] || echo "nameserver $PIHOLE" > "$RESOLV"; }
+
+case "${1:-run}" in
+	off)  # used by the init script on stop
+		tailscale set --exit-node= --accept-routes=false >/dev/null 2>&1; dns_uplink; exit 0 ;;
+esac
+
+dns_uplink
+while :; do
+	if uplink_clean && tailnet_ok; then
+		if ! exit_on; then
+			tailscale set --exit-node="$EXIT" --exit-node-allow-lan-access=true --accept-routes=true &&
+				log "uplink clean and $EXIT online: exit node ON"
+		fi
+		exit_on && dns_pihole
+	else
+		if exit_on; then
+			tailscale set --exit-node= --accept-routes=false && log "uplink blocked or tunnel down: exit node OFF"
+		fi
+		dns_uplink
+	fi
+	sleep 30
+done

@@ -1,0 +1,4 @@
+# Re-share the ASUS USB-BT400 when it is unplugged and plugged back in.
+[ "$ACTION" = add ] && [ "$DEVTYPE" = usb_device ] || exit 0
+case "$PRODUCT" in b05/17cb/*) ;; *) exit 0 ;; esac
+/usr/sbin/usbip-bind-bt400

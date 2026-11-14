@@ -1,0 +1,42 @@
+# beryl-mode template (away). Installed by the image; /etc/uci-defaults/90-beryl-mode copies it to
+# /etc/beryl-mode/away/ on a fresh install and fills in this unit's own ula_prefix, DHCP DUID and
+# br-lan MAC (eth1's, which the home router's .103 reservation is keyed on). No secrets here.
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	list ipaddr '127.0.0.1/8'
+
+config globals 'globals'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	option bridge_empty '1'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'static'
+	option ipaddr '192.168.23.1'
+	option netmask '255.255.255.0'
+	option ip6assign '60'
+
+config interface 'tailscale'
+	option proto 'none'
+	option device 'tailscale0'
+
+config interface 'wan'
+	option device 'eth0'
+	option proto 'dhcp'
+
+config interface 'wan6'
+	option device '@wan'
+	option proto 'dhcpv6'
+
+config interface 'trm_wwan'
+	option proto 'dhcp'
+	option metric '100'
+
+config interface 'trm_wwan6'
+	option device '@trm_wwan'
+	option proto 'dhcpv6'
+

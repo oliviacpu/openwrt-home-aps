@@ -1,0 +1,33 @@
+#!/bin/sh
+# Fresh install or factory reset: build /etc/beryl-mode/{home,away} from the PSK-free templates in
+# /usr/share/beryl-mode and start in Home. The LAN then joins the home network as a DHCP client
+# (eth0 + eth1 bridged; br-lan carries eth1's MAC, which the home router's .103 reservation is keyed
+# on). Wi-Fi stays off until `beryl-mode psk` sets the passphrase, or a settings backup is restored.
+# Runs before 99-lan-dhcp, which leaves the network alone once /etc/beryl-mode/current exists.
+# After an upgrade that kept settings, /etc/beryl-mode/current exists, so this does nothing.
+D=/etc/beryl-mode
+T=/usr/share/beryl-mode
+[ -f "$D/current" ] && exit 0
+for m in home away; do
+	for f in network wireless dhcp firewall; do [ -s "$T/$m/$f" ] || exit 0; done
+done
+
+# This unit's own values, from the stock config that was just generated
+ula=$(uci -q get network.globals.ula_prefix)
+duid=$(uci -q get network.globals.dhcp_default_duid)
+mac=$(cat /sys/class/net/eth1/address 2>/dev/null)
+
+mkdir -p "$D/home" "$D/away"
+for m in home away; do
+	for f in network wireless dhcp firewall; do cp "$T/$m/$f" "$D/$m/$f"; done
+	U="uci -c $D/$m"
+	[ -n "$ula" ] && $U set "network.globals.ula_prefix=$ula"
+	[ -n "$duid" ] && $U set "network.globals.dhcp_default_duid=$duid"
+	dev=$($U show network | sed -n "s/^network\.\([^.]*\)\.name='br-lan'\$/\1/p" | head -n 1)
+	[ -n "$dev" ] && [ -n "$mac" ] && $U set "network.$dev.macaddr=$mac"
+	$U commit network
+done
+for f in network wireless dhcp firewall; do cp "$D/home/$f" "/etc/config/$f"; done
+echo home > "$D/current"
+logger -t beryl-mode "fresh install: Home mode from the templates; Wi-Fi off until 'beryl-mode psk'"
+exit 0
