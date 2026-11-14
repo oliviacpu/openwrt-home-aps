@@ -38,7 +38,7 @@ done
 check "LuCI and wpad installed"             "grep -qx 'P:luci-base' '$R/lib/apk/db/installed' && grep -q '^P:wpad' '$R/lib/apk/db/installed'"
 check "LuCI HTTPS (luci-ssl) installed"     "grep -qx 'P:luci-ssl' '$R/lib/apk/db/installed'"
 check "zsh + zoneinfo-america installed"    "grep -qx 'P:zsh' '$R/lib/apk/db/installed' && grep -qx 'P:zoneinfo-america' '$R/lib/apk/db/installed' && test -x '$R/usr/bin/zsh'"
-for p in htop tcpdump-mini iperf3 curl nano tmux mtr-nojson ethtool drill lldpd usteer luci-app-usteer prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi_stations; do
+for p in snmpd-nossl htop tcpdump-mini iperf3 curl nano tmux mtr-nojson ethtool drill lldpd usteer luci-app-usteer prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi_stations; do
 	check "package $p installed"            "grep -qx 'P:$p' '$R/lib/apk/db/installed'"
 done
 check "full wpad (802.11v) replaces wpad-basic" "grep -qx 'P:wpad-mbedtls' '$R/lib/apk/db/installed' && ! grep -qx 'P:wpad-basic-mbedtls' '$R/lib/apk/db/installed'"
