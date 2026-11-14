@@ -47,6 +47,7 @@ check "oh-my-posh is a static MIPS LE binary" "test -x '$R/usr/bin/oh-my-posh' &
 check "oh-my-zsh core present"              "test -f '$R/usr/share/oh-my-zsh/oh-my-zsh.sh' && test -d '$R/usr/share/oh-my-zsh/lib'"
 check "root zsh: .zshrc + login default"    "test -f '$R/root/.zshrc' && test -x '$R/etc/uci-defaults/96-zsh-root'"
 check "ap-status login card is executable" "test -x '$R/usr/bin/ap-status'"
+check "quiet login (empty banner, apk cheat sheet hushed)" "test -f '$R/etc/banner' && ! test -s '$R/etc/banner' && test -f '$R/etc/profile.d/apk-cheatsheet.hush' && test -s '$R/etc/banner.failsafe'"
 check "HA helper scripts (ha-wifi, ha-weaknames, cpu-busy)" "test -x '$R/usr/sbin/ha-wifi' && test -x '$R/usr/sbin/ha-weaknames' && test -x '$R/usr/sbin/cpu-busy' && test -x '$R/etc/uci-defaults/95-ha-scripts'"
 check "ha-mqtt publisher + service present"  "test -x '$R/usr/sbin/ha-mqtt' && test -x '$R/etc/init.d/ha-mqtt' && test -x '$R/etc/uci-defaults/94-ha-mqtt'"
 check "ha_mqtt ships disabled, no credentials" "grep -qxE \"[[:space:]]*option enabled '0'\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option host ''\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option username ''\" '$R/etc/config/ha_mqtt' && grep -qxE \"[[:space:]]*option password ''\" '$R/etc/config/ha_mqtt'"

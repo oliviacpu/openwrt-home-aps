@@ -51,7 +51,8 @@ while read -r k v _; do
 done < /proc/meminfo
 temp=0
 for t in /sys/class/hwmon/hwmon*/temp1_input; do
-	[ -r "$t" ] && read -r v < "$t" && [ "$v" -gt "$temp" ] && temp=$v
+	# mt7915 reads 0 (or near it) until its sensor is ready, so only trust 10-130 °C.
+	[ -r "$t" ] && read -r v < "$t" && [ "$v" -ge 10000 ] && [ "$v" -le 130000 ] && [ "$v" -gt "$temp" ] && temp=$v
 done
 free_k=$(df -k /overlay 2>/dev/null | awk 'NR == 2 { print $4 }')
 line="  $K$i_clock$X up $(ago "${up%.*}") $dot load $l1 $l5 $l15 $dot $P$i_mem$X $(((mt - ma) / 1024))/$((mt / 1024)) MB"
@@ -69,9 +70,12 @@ case $speed in
 esac
 line="  $C$i_eth$X ${IP:-no address} $dot $speed $duplex"
 if command -v lldpcli >/dev/null 2>&1; then
+	# Every neighbor, not just the last: plain bridges forward CDP, so besides the switch this AP
+	# also hears other APs through it (the Netgear hears "Beryl br-lan" via Silk).
 	n=$(lldpcli -f keyvalue show neighbors 2>/dev/null | awk -F= '
-		/\.chassis\.name=/ { name = $2 } /\.port\.descr=/ { port = $2 } /\.via=/ { via = $2 }
-		END { if (name != "") printf "%s %s (%s)", name, port, via }')
+		function flush() { if (name != "") out = out (out == "" ? "" : ", ") name " " port; name = port = "" }
+		/\.rid=/ { flush() } /\.chassis\.name=/ { name = $2 } /\.port\.descr=/ { port = $2 } /\.via=/ { via = $2 }
+		END { flush(); if (out != "") printf "%s (%s)", out, via }')
 	[ -n "$n" ] && line="$line $dot $Y$n$X"
 fi
 echo "$line"
@@ -88,6 +92,9 @@ for d in /sys/class/net/phy*-ap*; do
 	if [ -n "$us" ]; then
 		load=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].load")
 		n=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].n_assoc")
+		# usteer derives load from the channel survey, which mt7915 sometimes reports as garbage
+		# (busy time > active time), giving loads like 913404%. Show it only when it's a real 0-100.
+		case $load in '' | *[!0-9]*) load= ;; *) [ "$load" -le 100 ] || load= ;; esac
 	fi
 	[ -n "$n" ] || n=$(ubus call iwinfo assoclist "{\"device\":\"$d\"}" 2>/dev/null | jsonfilter -e '@.results[*].mac' | wc -l)
 	line=$(printf '  %s%s%s %-7s %-6s %-5s %2s dBm' "$P" "$i_wifi" "$X" "$(band "$FREQ")" "ch $CH" "$HT" "$TX")
@@ -97,10 +104,12 @@ done
 
 # ---- roaming peers seen by usteer
 peers=$(ubus call usteer remote_info 2>/dev/null)
-[ -n "$peers" ] && echo "$peers" | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | while read -r key; do
+# usteer can list the same peer key twice (ubus allows duplicate keys), hence sort -u.
+[ -n "$peers" ] && echo "$peers" | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | sort -u | while read -r key; do
 	F= N= L=
 	eval "$(echo "$peers" | jsonfilter -e "F=@['$key'].freq" -e "N=@['$key'].n_assoc" -e "L=@['$key'].load")"
-	echo "  $C$i_peer$X peer $Y${key%%#*}$X $dot $(band "${F:-0}") $dot $Y$(plural "${N:-0}" client)$X $dot load ${L:-?}%"
+	case $L in '' | *[!0-9]*) L= ;; *) [ "$L" -le 100 ] || L= ;; esac
+	echo "  $C$i_peer$X peer $Y${key%%#*}$X $dot $(band "${F:-0}") $dot $Y$(plural "${N:-0}" client)$X${L:+ $dot load $L%}"
 done
 
 # ---- firmware updates (ghupdate)

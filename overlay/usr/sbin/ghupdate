@@ -204,7 +204,9 @@ apply() {
 	log "installing $R_TAG with sysupgrade (settings kept); rebooting"
 	sync
 	release_lock
-	exec sysupgrade "$IMG"
+	# -u: keep only files that differ from /rom, so unmodified copies (e.g. an image file listed in
+	# sysupgrade.conf) don't shadow newer versions in the next image.
+	exec sysupgrade -u "$IMG"
 }
 
 auto() {
