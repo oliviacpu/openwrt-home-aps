@@ -32,15 +32,20 @@ check "updater settings present"            "grep -q \"option repo\" '$R/etc/con
 check "LuCI module + views present"         "test -f '$R/www/luci-static/resources/ghupdate.js' && test -f '$R/www/luci-static/resources/view/status/include/05_ghupdate.js' && test -f '$R/www/luci-static/resources/view/system/ghupdate.js'"
 check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' >/dev/null"
 for t in usign uclient-fetch jsonfilter sha256sum; do
-	check "device has $t"                   "ls -d '$R/bin/$t' '$R/sbin/$t' '$R/usr/bin/$t' '$R/usr/sbin/$t' 2>/dev/null | grep -q ."
+	check "device has $t"                   "find '$R/bin' '$R/sbin' '$R/usr/bin' '$R/usr/sbin' -maxdepth 1 -name '$t' | grep -q ."
 done
 check "LuCI and wpad installed"             "grep -qx 'P:luci-base' '$R/lib/apk/db/installed' && grep -q '^P:wpad' '$R/lib/apk/db/installed'"
 
 if [ -n "$OFFICIAL" ]; then
 	mkdir "$W/o"; tar -xf "$OFFICIAL" -C "$W/o"
 	unsquashfs -q -n -d "$W/o/r" "$W/o/sysupgrade-$PROFILE/root" lib/apk/db/installed >/dev/null
-	missing=$(comm -23 <(grep '^P:' "$W/o/r/lib/apk/db/installed" | sort -u) <(grep '^P:' "$R/lib/apk/db/installed" | sort -u) | tr '\n' ' ')
-	check "every official package is included${missing:+ (missing: $missing)}" "[ -z '$missing' ]"
+	# Left out on purpose: OpenWrt's own Attended Sysupgrade tools would offer official images,
+	# which lack the preinit fix. ghupdate is this device's updater.
+	excluded='^P:(attendedsysupgrade-common|luci-app-attendedsysupgrade|owut|rpcd-mod-rpcsys|ucode-mod-uclient)$'
+	missing=$(comm -23 <(grep '^P:' "$W/o/r/lib/apk/db/installed" | grep -vE "$excluded" | sort -u) \
+	                   <(grep '^P:' "$R/lib/apk/db/installed" | sort -u) | tr '\n' ' ')
+	check "every official package is included, except Attended Sysupgrade${missing:+ (missing: $missing)}" "[ -z '$missing' ]"
+	check "Attended Sysupgrade is not installed" "! grep -qE '$excluded' '$R/lib/apk/db/installed'"
 fi
 
 [ "$fail" = 0 ] || { echo "verify: FAILED" >&2; exit 1; }
