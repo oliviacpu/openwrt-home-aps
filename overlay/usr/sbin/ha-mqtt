@@ -20,7 +20,10 @@ STATE_TOPIC="$TPREFIX/$NODE/state"
 
 # ---------- helpers ----------
 num() { [ -n "$1" ] && echo "$1" || echo null; }                # JSON number or null
-str() { [ -n "$1" ] && printf '"%s"' "$1" || echo null; }          # JSON string or null
+# JSON-escape: strip control characters, escape \ and ". Needed because some values come off the
+# wire (LLDP/CDP names advertised by other devices) and must not be able to break or inject JSON.
+esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+str() { [ -n "$1" ] && printf '"%s"' "$(esc "$1")" || echo null; }   # JSON string or null
 milli() { [ -r "$1" ] && awk '{ printf "%.1f", $1 / 1000 }' "$1"; }   # millidegree file -> degrees
 radio() { uci show wireless | sed -n "s/^wireless\.\([^.]*\)\.band='$1'$/\1/p" | head -n 1; }
 aps() {  # access-point ifnames on band $1 (2g/5g), from netifd
@@ -79,7 +82,7 @@ firmware_json() {  # Netgear image updates (ghupdate) for a read-only MQTT updat
 	inst="build ${GHU_SERIAL:-?}"; latest=$inst
 	case "$UA" in true|1) [ -n "$LS" ] && latest="build $LS" ;; esac
 	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","release_summary":"ghupdate state: %s"}\n' \
-		"$inst" "$latest" "$NAME" "${ST:-unknown}"
+		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$(esc "${ST:-unknown}")"
 }
 signals() { for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
 	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k; break } }'; }
@@ -143,7 +146,7 @@ discovery() {  # prints "topic<TAB>payload" lines
 	model=$(cat /tmp/sysinfo/model 2>/dev/null)
 	lanip=$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address')
 	dev=$(printf '{"identifiers":["openwrt_ap_%s"],"name":"%s","model":"%s","manufacturer":"%s","sw_version":"%s","configuration_url":"http://%s/"}' \
-		"$NODE" "$NAME" "$model" "${model%% *}" "$(. /etc/openwrt_release; echo "OpenWrt $DISTRIB_RELEASE")" "$lanip")
+		"$NODE" "$(esc "$NAME")" "$(esc "$model")" "$(esc "${model%% *}")" "$(. /etc/openwrt_release; esc "OpenWrt $DISTRIB_RELEASE")" "$(esc "$lanip")")
 	echo "$SENSORS" | while IFS='|' read -r key name unit dclass sclass icon; do
 		extra=
 		[ -n "$unit" ] && extra="$extra,\"unit_of_measurement\":\"$unit\""
