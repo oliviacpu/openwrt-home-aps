@@ -11,7 +11,7 @@ img=$(ls "$OUT"/*-"$PROFILE"-squashfs-sysupgrade.bin)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 tar -xf "$img" -C "$W"
 # only the directories we inspect (dev/ holds device nodes that need root to create)
-unsquashfs -q -n -d "$W/r" "$W/sysupgrade-$PROFILE/root" bin sbin etc lib usr www >/dev/null
+unsquashfs -q -n -d "$W/r" "$W/sysupgrade-$PROFILE/root" bin sbin etc lib usr www root >/dev/null
 R=$W/r
 fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
@@ -43,6 +43,10 @@ for p in htop tcpdump-mini iperf3 curl nano tmux mtr-nojson ethtool drill lldpd 
 done
 check "full wpad (802.11v) replaces wpad-basic" "grep -qx 'P:wpad-mbedtls' '$R/lib/apk/db/installed' && ! grep -qx 'P:wpad-basic-mbedtls' '$R/lib/apk/db/installed'"
 check "one-time AP defaults script"         "test -x '$R/etc/uci-defaults/97-ap-defaults'"
+check "oh-my-posh is a static MIPS LE binary" "test -x '$R/usr/bin/oh-my-posh' && file -b '$R/usr/bin/oh-my-posh' | grep -q 'LSB executable, MIPS' && file -b '$R/usr/bin/oh-my-posh' | grep -q 'statically linked'"
+check "oh-my-zsh core present"              "test -f '$R/usr/share/oh-my-zsh/oh-my-zsh.sh' && test -d '$R/usr/share/oh-my-zsh/lib'"
+check "root zsh: .zshrc + login default"    "test -f '$R/root/.zshrc' && test -x '$R/etc/uci-defaults/96-zsh-root'"
+check "ap-status login card is executable" "test -x '$R/usr/bin/ap-status'"
 check "image fits the firmware partition"   "[ \$(stat -c %s '$img' 2>/dev/null || stat -f %z '$img') -lt 39845888 ]"
 
 if [ -n "$OFFICIAL" ]; then

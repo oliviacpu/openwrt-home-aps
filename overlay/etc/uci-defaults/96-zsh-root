@@ -1,0 +1,5 @@
+#!/bin/sh
+# Root logs in to zsh (baked into the image), also after a factory reset. Idempotent.
+grep -qx /usr/bin/zsh /etc/shells || echo /usr/bin/zsh >> /etc/shells
+sed -i '/^root:/s#:/bin/ash$#:/usr/bin/zsh#' /etc/passwd
+exit 0

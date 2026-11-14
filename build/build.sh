@@ -22,6 +22,11 @@ PACKAGES="$PACKAGES usteer luci-app-usteer"                        # band steeri
 PACKAGES="$PACKAGES wpad-mbedtls -wpad-basic-mbedtls"             # full hostapd: 802.11v (bss_transition) for usteer
 PACKAGES="$PACKAGES prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi"
 PACKAGES="$PACKAGES prometheus-node-exporter-lua-wifi_stations prometheus-node-exporter-lua-hostapd_stations"
+# Shell extras built/fetched from pinned upstream sources (no OpenWrt packages for them).
+POSH_VERSION=32.0.0                                       # Oh My Posh, cross-compiled for mipsle
+POSH_COMMIT=d01ca021d6ceb899e252884f3a95db5969a4b8fd      # = tag v32.0.0
+OMZ_COMMIT=2100c630ba4bd67bb48802c3e7da893a4fdaa1a0       # Oh My Zsh core
+GO_IMAGE=golang:1.27                                      # oh-my-posh's go.mod needs Go >= 1.27
 die() { echo "build: $*" >&2; exit 1; }
 
 if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${USIGN_SECRET_KEY:-}" ]; then
@@ -68,6 +73,26 @@ GHU_SERIAL='$SERIAL'
 GHU_OPENWRT='$V'
 GHU_PROFILE='$PROFILE'
 EOF
+
+# 2b) Oh My Posh: no MIPS release upstream, so build the pinned tag as a static mipsle binary.
+#     GOMIPS=softfloat because the MT7621's 1004Kc cores have no FPU. Flags follow upstream's
+#     src/.goreleaser.yml. Built as the calling user so the output stays removable.
+git clone -q --depth 1 --branch "v$POSH_VERSION" https://github.com/JanDeDobbeleer/oh-my-posh.git "$WORK/posh"
+[ "$(git -C "$WORK/posh" rev-parse HEAD)" = "$POSH_COMMIT" ] || die "oh-my-posh v$POSH_VERSION is not commit $POSH_COMMIT"
+posh_date=$(git -C "$WORK/posh" log -1 --format=%cI)
+mkdir -p "$FILES/usr/bin" "$WORK/gotmp"
+docker run --rm --user "$(id -u):$(id -g)" \
+	-v "$WORK/posh:/src" -v "$FILES/usr/bin:/out" -v "$WORK/gotmp:/gotmp" -w /src/src \
+	-e HOME=/gotmp -e GOCACHE=/gotmp/cache -e GOPATH=/gotmp/path -e GOFLAGS=-modcacherw \
+	-e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=mipsle -e GOMIPS=softfloat -e GOEXPERIMENT=greenteagc,jsonv2 \
+	"$GO_IMAGE" go build -a -trimpath -tags netgo,osusergo,static_build,timetzdata \
+	-ldflags "-s -w -X github.com/jandedobbeleer/oh-my-posh/src/build.Version=$POSH_VERSION -X github.com/jandedobbeleer/oh-my-posh/src/build.Date=$posh_date" \
+	-o /out/oh-my-posh . > "$OUT/oh-my-posh-build.log" 2>&1 || { tail -30 "$OUT/oh-my-posh-build.log" >&2; die "oh-my-posh build failed"; }
+
+# 2c) Oh My Zsh core only (prompt comes from Oh My Posh; no themes or plugins).
+curl -fsSL "https://github.com/ohmyzsh/ohmyzsh/archive/$OMZ_COMMIT.tar.gz" | tar -xz -C "$WORK"
+mkdir -p "$FILES/usr/share/oh-my-zsh"
+for p in lib tools custom oh-my-zsh.sh LICENSE.txt; do cp -a "$WORK/ohmyzsh-$OMZ_COMMIT/$p" "$FILES/usr/share/oh-my-zsh/"; done
 
 # 3) Image Builder: default + device packages + LuCI (with HTTPS, as in official images) + zsh and
 #    zoneinfo-america (used on this AP; installing them via apk would not survive upgrades), our files

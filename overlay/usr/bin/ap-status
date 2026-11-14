@@ -1,0 +1,126 @@
+#!/bin/sh
+# ap-status: a login status card for an OpenWrt access point.
+# Shows firmware and update state, health, the wired uplink (LLDP), each radio, and usteer
+# roaming peers. Read-only, about half a second on a WAX214v2. zsh runs it on interactive
+# login (see /root/.zshrc). Run `ap-status` any time, or `ap-status --plain` for no color.
+# Colors are the "netgear" Oh My Posh palette (Dracula Pro Lincoln); icons need a Nerd Font.
+
+if [ "$1" = --plain ] || [ ! -t 1 ]; then
+	Y= P= O= C= K= G= R= D= X= HB= HF=
+else
+	e=$(printf '\033')
+	Y="$e[38;2;255;255;128m" P="$e[38;2;149;128;255m" O="$e[38;2;255;202;128m"
+	C="$e[38;2;128;255;234m" K="$e[38;2;255;128;191m" G="$e[38;2;138;255;128m"
+	R="$e[38;2;255;149;128m" D="$e[2m" X="$e[0m"
+	HB="$e[48;2;255;255;128m$e[38;2;44;42;33m" HF="$e[38;2;255;255;128m"
+fi
+i_router=$(printf '\363\260\221\251') i_clock=$(printf '\363\260\224\237')
+i_eth=$(printf '\363\260\210\200') i_wifi=$(printf '\363\260\226\251')
+i_upd=$(printf '\363\260\232\260') i_temp=$(printf '\357\213\211')
+i_mem=$(printf '\363\260\215\233') i_disk=$(printf '\363\260\213\212')
+i_peer=$(printf '\363\260\233\263') i_ok=$(printf '\363\260\204\254')
+i_warn=$(printf '\363\260\200\246') i_pl=$(printf '\356\202\260') i_plr=$(printf '\356\202\266')
+dot="$D·$X"
+
+ago() { # seconds -> "3d 4h", "2h 5m", "7m"
+	if [ "$1" -ge 86400 ]; then echo "$(($1 / 86400))d $(($1 % 86400 / 3600))h"
+	elif [ "$1" -ge 3600 ]; then echo "$(($1 / 3600))h $(($1 % 3600 / 60))m"
+	else echo "$(($1 / 60))m"; fi
+}
+band() { # MHz -> band
+	if [ "$1" -lt 3000 ]; then echo 2.4 GHz; elif [ "$1" -lt 5925 ]; then echo 5 GHz; else echo 6 GHz; fi
+}
+plural() { [ "$1" = 1 ] && echo "$1 $2" || echo "$1 ${2}s"; }
+is_true() { [ "$1" = true ] || [ "$1" = 1 ]; }
+
+# ---- identity
+read -r host < /proc/sys/kernel/hostname
+model=$(cat /tmp/sysinfo/model 2>/dev/null)
+. /etc/openwrt_release 2>/dev/null
+build=
+[ -r /etc/ghupdate/build ] && . /etc/ghupdate/build && build=" build $GHU_SERIAL"
+title="$Y$host$X $dot "
+[ -n "$POSH_HOST" ] || { POSH_HOST=$host title=; }   # the segment already shows the hostname
+echo "$HF$i_plr$HB$i_router $POSH_HOST $X$HF$i_pl$X $title$model $dot OpenWrt $DISTRIB_RELEASE$build"
+
+# ---- health
+read -r up _ < /proc/uptime
+read -r l1 l5 l15 _ < /proc/loadavg
+while read -r k v _; do
+	case $k in MemTotal:) mt=$v ;; MemAvailable:) ma=$v ;; esac
+done < /proc/meminfo
+temp=0
+for t in /sys/class/hwmon/hwmon*/temp1_input; do
+	[ -r "$t" ] && read -r v < "$t" && [ "$v" -gt "$temp" ] && temp=$v
+done
+free_k=$(df -k /overlay 2>/dev/null | awk 'NR == 2 { print $4 }')
+line="  $K$i_clock$X up $(ago "${up%.*}") $dot load $l1 $l5 $l15 $dot $P$i_mem$X $(((mt - ma) / 1024))/$((mt / 1024)) MB"
+[ "$temp" -gt 0 ] && line="$line $dot $O$i_temp$X $((temp / 1000))°C"
+[ -n "$free_k" ] && line="$line $dot $C$i_disk$X $((free_k / 1024)) MB free"
+echo "$line"
+
+# ---- wired uplink
+IP=
+eval "$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e 'IP=@["ipv4-address"][0].address')"
+port=lan; [ -e /sys/class/net/$port ] || port=eth0
+speed=$(cat /sys/class/net/$port/speed 2>/dev/null) duplex=$(cat /sys/class/net/$port/duplex 2>/dev/null)
+case $speed in
+	1000) speed=1G ;; 2500) speed=2.5G ;; 10000) speed=10G ;; '' | -1) speed=down duplex= ;; *) speed=${speed}M ;;
+esac
+line="  $C$i_eth$X ${IP:-no address} $dot $speed $duplex"
+if command -v lldpcli >/dev/null 2>&1; then
+	n=$(lldpcli -f keyvalue show neighbors 2>/dev/null | awk -F= '
+		/\.chassis\.name=/ { name = $2 } /\.port\.descr=/ { port = $2 } /\.via=/ { via = $2 }
+		END { if (name != "") printf "%s %s (%s)", name, port, via }')
+	[ -n "$n" ] && line="$line $dot $Y$n$X"
+fi
+echo "$line"
+
+# ---- radios (usteer supplies load and client counts when it's running)
+us=$(ubus call usteer local_info 2>/dev/null)
+for d in /sys/class/net/phy*-ap*; do
+	[ -e "$d" ] || continue
+	d=${d##*/}
+	CH= HT= TX= FREQ= SSID= load= n=
+	eval "$(ubus call iwinfo info "{\"device\":\"$d\"}" 2>/dev/null |
+		jsonfilter -e 'CH=@.channel' -e 'HT=@.htmode' -e 'TX=@.txpower' -e 'FREQ=@.frequency' -e 'SSID=@.ssid')"
+	[ -n "$FREQ" ] || continue
+	if [ -n "$us" ]; then
+		load=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].load")
+		n=$(echo "$us" | jsonfilter -e "@['hostapd.$d'].n_assoc")
+	fi
+	[ -n "$n" ] || n=$(ubus call iwinfo assoclist "{\"device\":\"$d\"}" 2>/dev/null | jsonfilter -e '@.results[*].mac' | wc -l)
+	line=$(printf '  %s%s%s %-7s %-6s %-5s %2s dBm' "$P" "$i_wifi" "$X" "$(band "$FREQ")" "ch $CH" "$HT" "$TX")
+	[ -n "$load" ] && line="$line $dot load $(printf '%2s' "$load")%"
+	echo "$line $dot $Y$(plural "$n" client)$X $D$SSID$X"
+done
+
+# ---- roaming peers seen by usteer
+peers=$(ubus call usteer remote_info 2>/dev/null)
+[ -n "$peers" ] && echo "$peers" | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | while read -r key; do
+	F= N= L=
+	eval "$(echo "$peers" | jsonfilter -e "F=@['$key'].freq" -e "N=@['$key'].n_assoc" -e "L=@['$key'].load")"
+	echo "  $C$i_peer$X peer $Y${key%%#*}$X $dot $(band "${F:-0}") $dot $Y$(plural "${N:-0}" client)$X $dot load ${L:-?}%"
+done
+
+# ---- firmware updates (ghupdate)
+if command -v ghupdate >/dev/null 2>&1; then
+	ST= MSG= UA= LS= AE= AN=0 AB= LC=0
+	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'MSG=@.message' -e 'UA=@.update_available' \
+		-e 'LS=@.latest.serial' -e 'AE=@.auto.enabled' -e 'AN=@.auto.next' -e 'AB=@.auto.blocked' -e 'LC=@.last_check')"
+	case $ST in
+		error) line="  $R$i_warn$X ${R}update check failed: $MSG$X" ;;
+		downloading | ready | installing) line="  $O$i_upd$X ${O}build $LS: $ST$X" ;;
+		*)
+			if is_true "$UA"; then
+				line="  $O$i_upd$X ${O}build $LS available$X"
+				if [ -n "$AB" ]; then line="$line $dot auto-install blocked: $AB"
+				elif is_true "$AE" && [ "${AN:-0}" -gt 0 ]; then line="$line $dot auto-installs $(date -d "@$AN" '+%a %H:%M')"
+				else line="$line $dot ghupdate install"; fi
+			else
+				line="  $G$i_ok$X firmware up to date"
+				[ "${LC:-0}" -gt 0 ] && line="$line $dot checked $(ago $(($(date +%s) - LC))) ago"
+			fi ;;
+	esac
+	echo "$line"
+fi
