@@ -139,8 +139,13 @@ pub() {  # pub TOPIC PAYLOAD [retain]
 write_opts() {  # broker options live in a 0600 file, never on the command line (ps would show them)
 	mkdir -p /tmp/ha-mqtt; chmod 700 /tmp/ha-mqtt
 	umask 077
-	{ echo "-h $(cfg host)"; echo "-p $(cfg port || echo 1883)"; echo "-i ha-mqtt-$NODE"
-	  [ -n "$(cfg username)" ] && echo "-u $(cfg username)"; [ -n "$(cfg password)" ] && echo "-P $(cfg password)"; } > /tmp/ha-mqtt/mosquitto_pub
+	port=$(cfg port); port=${port:-1883}
+	user=$(cfg username); pass=$(cfg password)
+	# The options file holds one "-flag value" per line and can't quote, so reject whitespace.
+	case "$(cfg host)$user$pass" in *" "*|*"	"*)
+		logger -t ha-mqtt "host, username and password must not contain spaces or tabs"; exit 1 ;; esac
+	{ echo "-h $(cfg host)"; echo "-p $port"; echo "-i ha-mqtt-$NODE"
+	  [ -n "$user" ] && echo "-u $user"; [ -n "$pass" ] && echo "-P $pass"; } > /tmp/ha-mqtt/mosquitto_pub
 }
 
 case "${1:-run}" in
