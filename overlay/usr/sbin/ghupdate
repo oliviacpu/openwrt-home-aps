@@ -1,0 +1,244 @@
+#!/bin/sh
+# ghupdate: keep this device on the signed firmware builds published as GitHub Releases.
+#
+#   ghupdate check     refresh /tmp/ghupdate/status.json from the repo's latest release
+#   ghupdate prepare   download the newer image; verify signature, checksum, sysupgrade -T
+#   ghupdate apply     flash the prepared image (settings kept; the device reboots)
+#   ghupdate install   prepare + apply
+#   ghupdate auto      check, then install if the auto-install rules allow it (cron, hourly)
+#   ghupdate status    print the status JSON
+#
+# Settings: /etc/config/ghupdate  (repo, auto, soak_days, hour, auto_major)
+# Only GitHub's "latest" release is considered, so drafts and pre-releases are ignored. To
+# pull a bad build, delete it or mark it pre-release.
+
+. /usr/share/libubox/jshn.sh
+
+NAME=ghupdate
+RUN=/tmp/ghupdate
+STATUS=$RUN/status.json
+LATEST=$RUN/latest.env
+READY=$RUN/ready.env
+IMG=$RUN/sysupgrade.bin
+SUMS=$RUN/SHA256SUMS
+SIG=$RUN/SHA256SUMS.sig
+LOCKDIR=$RUN/lock
+BUILD_INFO=/etc/ghupdate/build
+PUBKEY=/etc/ghupdate/release.pub
+UA="ghupdate/1 (OpenWrt)"
+
+mkdir -p "$RUN"
+
+cfg() { local v; v=$(uci -q get "ghupdate.main.$1"); [ -n "$v" ] && echo "$v" || echo "$2"; }
+REPO=$(cfg repo oliviacpu/openwrt-wax214v2)
+AUTO=$(cfg auto 1)
+SOAK_DAYS=$(cfg soak_days 3)
+HOUR=$(cfg hour 4)
+AUTO_MAJOR=$(cfg auto_major 0)
+case "$SOAK_DAYS" in ''|*[!0-9]*) SOAK_DAYS=3 ;; esac
+case "$HOUR" in ''|*[!0-9]*) HOUR=4 ;; esac
+
+# Installed build (baked into the image by the build pipeline)
+GHU_TAG=unknown GHU_SERIAL=0 GHU_OPENWRT=unknown GHU_PROFILE=unknown
+[ -r "$BUILD_INFO" ] && . "$BUILD_INFO"
+
+# Latest release seen by the last successful check (values validated before being written)
+L_TAG='' L_SERIAL=0 L_OPENWRT='' L_PUBLISHED=0 L_URL='' L_IMG_URL='' L_IMG_NAME='' L_SUMS_URL='' L_SIG_URL='' L_CHECKED=0
+[ -r "$LATEST" ] && . "$LATEST"
+
+now()      { date +%s; }
+clock_ok() { [ "$(date +%Y)" -ge 2026 ]; }
+series()   { echo "$1" | cut -d. -f1-2; }
+clean()    { echo "$*" | tr -cd 'A-Za-z0-9 ._:/()+,=@-' | cut -c1-300; }
+log()      { logger -t "$NAME" -- "$*"; echo "$*" >&2; }
+
+update_available() { [ "$L_SERIAL" -gt "$GHU_SERIAL" ] 2>/dev/null; }
+
+# Why an available update will NOT be installed automatically (empty = it will be)
+auto_blocker() {
+	update_available || return 0
+	[ "$AUTO" = 1 ] || { echo "automatic install is off"; return 0; }
+	if [ "$AUTO_MAJOR" != 1 ] && [ "$(series "$L_OPENWRT")" != "$(series "$GHU_OPENWRT")" ]; then
+		echo "new release series $(series "$L_OPENWRT") needs a manual install"
+	fi
+}
+
+# Earliest moment auto-install may run: the soak period has passed AND it is the install hour.
+next_auto_install() {
+	local t c i h
+	t=$(( L_PUBLISHED + SOAK_DAYS * 86400 ))
+	[ "$t" -lt "$(now)" ] && t=$(now)
+	i=0
+	while [ "$i" -le 48 ]; do
+		c=$(( (t / 3600 + i) * 3600 + 37 * 60 ))      # cron runs at minute 37
+		h=$(date -d "@$c" +%H); h=${h#0}
+		[ "$c" -ge "$t" ] && [ "$h" = "$HOUR" ] && { echo "$c"; return; }
+		i=$((i + 1))
+	done
+	echo 0
+}
+
+write_status() {
+	local state="$1" msg ua=0 blocker next=0
+	msg=$(clean "${2:-}")
+	update_available && ua=1
+	blocker=$(auto_blocker)
+	[ "$ua" = 1 ] && [ -z "$blocker" ] && next=$(next_auto_install)
+	json_init
+	json_add_string state "$state"
+	json_add_string message "$msg"
+	json_add_string repo "$REPO"
+	json_add_boolean update_available "$ua"
+	json_add_object installed
+		json_add_string tag "$GHU_TAG"
+		json_add_string openwrt "$GHU_OPENWRT"
+		json_add_int serial "$GHU_SERIAL"
+	json_close_object
+	json_add_object latest
+		json_add_string tag "$L_TAG"
+		json_add_string openwrt "$L_OPENWRT"
+		json_add_int serial "$L_SERIAL"
+		json_add_int published "$L_PUBLISHED"
+		json_add_string url "$L_URL"
+	json_close_object
+	json_add_object auto
+		json_add_boolean enabled "$([ "$AUTO" = 1 ] && echo 1 || echo 0)"
+		json_add_int soak_days "$SOAK_DAYS"
+		json_add_int hour "$HOUR"
+		json_add_int next "$next"
+		json_add_string blocked "$blocker"
+	json_close_object
+	json_add_int last_check "$L_CHECKED"
+	json_add_int updated "$(now)"
+	json_dump > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
+}
+
+die() { log "error: $*"; write_status error "$*"; exit 1; }
+
+fetch() { uclient-fetch -q -T 60 -U "$UA" -O "$2" "$1" 2>/dev/null; }
+
+check() {
+	local json tag pub url u name v serial img='' imgname='' sums='' sig=''
+	clock_ok || log "warning: system clock not set yet (NTP)"
+	json=$(uclient-fetch -q -T 30 -U "$UA" -O - "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) \
+		|| die "cannot reach GitHub releases for $REPO"
+	tag=$(jsonfilter -s "$json" -e '@.tag_name' 2>/dev/null)
+	pub=$(jsonfilter -s "$json" -e '@.published_at' 2>/dev/null)
+	url=$(jsonfilter -s "$json" -e '@.html_url' 2>/dev/null)
+
+	echo "$tag" | grep -qxE 'openwrt-[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?-b[0-9]+' || die "unexpected release tag"
+	v=${tag#openwrt-}; v=${v%-b*}; serial=${tag##*-b}
+	echo "$pub" | grep -qxE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z' || die "unexpected publish date"
+	pub=$(date -u -D '%Y-%m-%dT%H:%M:%SZ' -d "$pub" +%s) || die "cannot parse publish date"
+	[ "$url" = "https://github.com/$REPO/releases/tag/$tag" ] || die "unexpected release URL"
+
+	for u in $(jsonfilter -s "$json" -e '@.assets[*].browser_download_url' 2>/dev/null); do
+		echo "$u" | grep -qxE "https://github\.com/$REPO/releases/download/$tag/[A-Za-z0-9._+-]+" || continue
+		name=${u##*/}
+		case "$name" in
+			*-"$GHU_PROFILE"-squashfs-sysupgrade.bin) img=$u; imgname=$name ;;
+			SHA256SUMS) sums=$u ;;
+			SHA256SUMS.sig) sig=$u ;;
+		esac
+	done
+	[ -n "$img" ] && [ -n "$sums" ] && [ -n "$sig" ] \
+		|| die "release $tag has no signed image for $GHU_PROFILE"
+
+	L_TAG=$tag L_OPENWRT=$v L_SERIAL=$serial L_PUBLISHED=$pub L_URL=$url
+	L_IMG_URL=$img L_IMG_NAME=$imgname L_SUMS_URL=$sums L_SIG_URL=$sig L_CHECKED=$(now)
+	cat > "$LATEST.tmp" <<-EOF
+		L_TAG='$L_TAG'
+		L_SERIAL='$L_SERIAL'
+		L_OPENWRT='$L_OPENWRT'
+		L_PUBLISHED='$L_PUBLISHED'
+		L_URL='$L_URL'
+		L_IMG_URL='$L_IMG_URL'
+		L_IMG_NAME='$L_IMG_NAME'
+		L_SUMS_URL='$L_SUMS_URL'
+		L_SIG_URL='$L_SIG_URL'
+		L_CHECKED='$L_CHECKED'
+	EOF
+	mv "$LATEST.tmp" "$LATEST"
+
+	if update_available; then
+		write_status update-available "OpenWrt $L_OPENWRT build $L_SERIAL is available"
+	else
+		write_status up-to-date "Up to date"
+	fi
+}
+
+prepare() {
+	local want have avail
+	check
+	update_available || die "no build newer than installed $GHU_TAG"
+	avail=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+	[ "${avail:-0}" -gt 65536 ] || die "not enough free memory to stage the image"
+
+	write_status downloading "Downloading $L_TAG"
+	rm -f "$IMG" "$SUMS" "$SIG" "$READY"
+	fetch "$L_SIG_URL" "$SIG" && fetch "$L_SUMS_URL" "$SUMS" || die "could not download checksums for $L_TAG"
+	usign -V -q -m "$SUMS" -p "$PUBKEY" -x "$SIG" || die "SIGNATURE CHECK FAILED for $L_TAG"
+	fetch "$L_IMG_URL" "$IMG" || die "could not download the image for $L_TAG"
+	want=$(awk -v n="$L_IMG_NAME" '{ f = $2; sub(/^\*/, "", f) } f == n { print $1 }' "$SUMS")
+	have=$(sha256sum "$IMG" | cut -d' ' -f1)
+	[ -n "$want" ] && [ "$want" = "$have" ] || die "checksum mismatch for $L_IMG_NAME"
+	sysupgrade -T "$IMG" > "$RUN/sysupgrade-test.log" 2>&1 \
+		|| die "sysupgrade rejected the image: $(tail -n 1 "$RUN/sysupgrade-test.log")"
+
+	echo "R_TAG='$L_TAG'" > "$READY"
+	write_status ready "$L_TAG verified and ready to install"
+	log "$L_TAG verified (signature, checksum, sysupgrade -T)"
+}
+
+apply() {
+	local R_TAG=''
+	[ -r "$READY" ] && [ -s "$IMG" ] || die "nothing prepared; run: ghupdate prepare"
+	. "$READY"
+	write_status installing "Installing $R_TAG; the device reboots when done"
+	log "installing $R_TAG with sysupgrade (settings kept); rebooting"
+	sync
+	release_lock
+	exec sysupgrade "$IMG"
+}
+
+auto() {
+	local blocker h
+	check
+	update_available || exit 0
+	blocker=$(auto_blocker)
+	[ -z "$blocker" ] || { log "update $L_TAG available; not auto-installing: $blocker"; exit 0; }
+	clock_ok || { log "clock not set; not auto-installing"; exit 0; }
+	[ "$(now)" -ge $(( L_PUBLISHED + SOAK_DAYS * 86400 )) ] || exit 0
+	h=$(date +%H); h=${h#0}
+	[ "$h" = "$HOUR" ] || exit 0
+	log "auto-installing $L_TAG (published $(date -d "@$L_PUBLISHED"), soak of $SOAK_DAYS days passed)"
+	prepare
+	apply
+}
+
+# Simple non-blocking lock (busybox 'lock' has no try-lock): a directory holding our PID.
+take_lock() {
+	if mkdir "$LOCKDIR" 2>/dev/null; then echo $$ > "$LOCKDIR/pid"; return 0; fi
+	local pid; pid=$(cat "$LOCKDIR/pid" 2>/dev/null)
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then return 1; fi
+	rm -rf "$LOCKDIR"; mkdir "$LOCKDIR" 2>/dev/null && echo $$ > "$LOCKDIR/pid"
+}
+release_lock() { [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCKDIR"; }
+
+cmd=${1:-}
+case "$cmd" in
+	status) cat "$STATUS" 2>/dev/null || echo '{"state":"unknown"}'; exit 0 ;;
+	check|prepare|apply|install|auto) ;;
+	*) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
+
+take_lock || { echo "another ghupdate run is in progress" >&2; exit 75; }
+trap release_lock EXIT
+
+case "$cmd" in
+	check)   check ;;
+	prepare) prepare ;;
+	apply)   apply ;;
+	install) prepare; apply ;;
+	auto)    auto ;;
+esac

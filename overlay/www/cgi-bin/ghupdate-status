@@ -1,0 +1,6 @@
+#!/bin/sh
+# Read-only firmware-update status as JSON, e.g. for a Home Assistant REST sensor.
+echo "Content-Type: application/json"
+echo "Cache-Control: no-store"
+echo
+cat /tmp/ghupdate/status.json 2>/dev/null || echo '{"state":"unknown"}'

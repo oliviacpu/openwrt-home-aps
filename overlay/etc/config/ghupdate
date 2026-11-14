@@ -1,0 +1,11 @@
+config settings 'main'
+	# GitHub repository that publishes signed builds for this device
+	option repo 'oliviacpu/openwrt-wax214v2'
+	# 1 = install new builds automatically; 0 = only when "Install now" is clicked
+	option auto '1'
+	# a release must be at least this many days old before it auto-installs
+	option soak_days '3'
+	# local hour (0-23) in which automatic installs may run
+	option hour '4'
+	# 1 = also auto-install a new release series (e.g. 25.12 -> 26.xx); 0 = manual only
+	option auto_major '0'

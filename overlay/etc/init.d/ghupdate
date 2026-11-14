@@ -1,0 +1,7 @@
+#!/bin/sh /etc/rc.common
+# Refresh firmware-update status shortly after boot (network and NTP need a moment).
+START=99
+
+start() {
+	( sleep 90; /usr/sbin/ghupdate check ) >/dev/null 2>&1 &
+}

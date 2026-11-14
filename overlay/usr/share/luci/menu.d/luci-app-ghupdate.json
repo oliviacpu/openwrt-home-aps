@@ -1,0 +1,13 @@
+{
+	"admin/system/ghupdate": {
+		"title": "Firmware Updates",
+		"order": 75,
+		"action": {
+			"type": "view",
+			"path": "system/ghupdate"
+		},
+		"depends": {
+			"acl": [ "luci-app-ghupdate" ]
+		}
+	}
+}

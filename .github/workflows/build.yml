@@ -1,0 +1,59 @@
+name: Build firmware
+
+on:
+  schedule:
+    - cron: '23 9 * * *'          # daily: pick up new OpenWrt releases
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if this OpenWrt version and overlay already have a release
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'overlay/**'
+      - 'build/**'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to build
+        id: decide
+        run: build/decide.sh "${{ inputs.force || 'false' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install tools
+        if: steps.decide.outputs.build == 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq squashfs-tools
+
+      - name: Build, verify, sign
+        if: steps.decide.outputs.build == 'true'
+        env:
+          USIGN_SECRET_KEY: ${{ secrets.USIGN_SECRET_KEY }}
+        run: build/build.sh "${{ steps.decide.outputs.version }}" "${{ steps.decide.outputs.serial }}" out
+
+      - name: Publish release
+        if: steps.decide.outputs.build == 'true'
+        run: build/publish.sh "${{ steps.decide.outputs.version }}" "${{ steps.decide.outputs.serial }}" "${{ steps.decide.outputs.key }}" out
+
+      - name: Keep build log
+        if: always() && steps.decide.outputs.build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagebuilder-log
+          path: out/imagebuilder.log
+          if-no-files-found: ignore

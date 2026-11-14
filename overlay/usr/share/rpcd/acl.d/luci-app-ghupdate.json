@@ -1,0 +1,25 @@
+{
+	"luci-app-ghupdate": {
+		"description": "Grant access to signed GitHub firmware updates",
+		"read": {
+			"file": {
+				"/tmp/ghupdate/status.json": [ "read" ]
+			},
+			"ubus": {
+				"file": [ "read" ]
+			},
+			"uci": [ "ghupdate" ]
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/ghupdate check": [ "exec" ],
+				"/usr/sbin/ghupdate prepare": [ "exec" ],
+				"/usr/sbin/ghupdate apply": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec" ]
+			},
+			"uci": [ "ghupdate" ]
+		}
+	}
+}
