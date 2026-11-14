@@ -10,7 +10,8 @@ TAG=openwrt-$V-b$SERIAL
 img=$(ls "$OUT"/*-"$PROFILE"-squashfs-sysupgrade.bin)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 tar -xf "$img" -C "$W"
-unsquashfs -q -n -d "$W/r" "$W/sysupgrade-$PROFILE/root" >/dev/null
+# only the directories we inspect (dev/ holds device nodes that need root to create)
+unsquashfs -q -n -d "$W/r" "$W/sysupgrade-$PROFILE/root" bin sbin etc lib usr www >/dev/null
 R=$W/r
 fail=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; fail=1; fi; }
