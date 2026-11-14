@@ -6,8 +6,10 @@ checks for new OpenWrt releases every day, then builds, verifies, signs and publ
 running these builds see the update in LuCI and install it with one click, or by themselves after a
 soak period.
 
-No OpenWrt fork: images come from the upstream **Image Builder** with the official packages. Only the
-files under [`overlay/`](overlay) are added.
+No OpenWrt fork: images come from the upstream **Image Builder** with the official packages, plus
+`luci-ssl` (HTTPS for the web UI, as in official images), `zsh` and `zoneinfo-america`. Packages
+installed with `apk` don't survive a sysupgrade, so anything that should stay belongs in
+[`build/build.sh`](build/build.sh). Only the files under [`overlay/`](overlay) are added on top.
 
 ## What's different from stock OpenWrt
 

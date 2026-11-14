@@ -115,7 +115,8 @@ write_status() {
 
 die() { log "error: $*"; write_status error "$*"; exit 1; }
 
-fetch() { uclient-fetch -q -T 60 -U "$UA" -O "$2" "$1" 2>/dev/null; }
+asset_url() { echo "https://api.github.com/repos/$REPO/releases/assets/$1"; }
+fetch() { uclient-fetch -q -T 60 -U "$UA" --header='Accept: application/octet-stream' -O "$2" "$1" 2>/dev/null; }
 
 check() {
 	local json tag pub url u name v serial img='' imgname='' sums='' sig=''
@@ -132,20 +133,24 @@ check() {
 	pub=$(date -u -D '%Y-%m-%dT%H:%M:%SZ' -d "$pub" +%s) || die "cannot parse publish date"
 	[ "$url" = "https://github.com/$REPO/releases/tag/$tag" ] || die "unexpected release URL"
 
-	for u in $(jsonfilter -s "$json" -e '@.assets[*].browser_download_url' 2>/dev/null); do
-		echo "$u" | grep -qxE "https://github\.com/$REPO/releases/download/$tag/[A-Za-z0-9._+-]+" || continue
-		name=${u##*/}
+	# Assets are fetched through the API (api.github.com -> release-assets.githubusercontent.com)
+	# rather than github.com/.../releases/download, so only the API and asset hosts must be reachable.
+	asset_id() { jsonfilter -s "$json" -e "@.assets[@.name=\"$1\"].id" 2>/dev/null | head -n 1; }
+	for name in $(jsonfilter -s "$json" -e '@.assets[*].name' 2>/dev/null); do
+		echo "$name" | grep -qxE '[A-Za-z0-9._+-]+' || continue
 		case "$name" in
-			*-"$GHU_PROFILE"-squashfs-sysupgrade.bin) img=$u; imgname=$name ;;
-			SHA256SUMS) sums=$u ;;
-			SHA256SUMS.sig) sig=$u ;;
+			*-"$GHU_PROFILE"-squashfs-sysupgrade.bin) imgname=$name; img=$(asset_id "$name") ;;
+			SHA256SUMS) sums=$(asset_id "$name") ;;
+			SHA256SUMS.sig) sig=$(asset_id "$name") ;;
 		esac
 	done
-	[ -n "$img" ] && [ -n "$sums" ] && [ -n "$sig" ] \
-		|| die "release $tag has no signed image for $GHU_PROFILE"
+	for u in "$img" "$sums" "$sig"; do
+		case "$u" in ''|*[!0-9]*) die "release $tag has no signed image for $GHU_PROFILE" ;; esac
+	done
 
 	L_TAG=$tag L_OPENWRT=$v L_SERIAL=$serial L_PUBLISHED=$pub L_URL=$url
-	L_IMG_URL=$img L_IMG_NAME=$imgname L_SUMS_URL=$sums L_SIG_URL=$sig L_CHECKED=$(now)
+	L_IMG_URL=$(asset_url "$img") L_IMG_NAME=$imgname L_CHECKED=$(now)
+	L_SUMS_URL=$(asset_url "$sums") L_SIG_URL=$(asset_url "$sig")
 	cat > "$LATEST.tmp" <<-EOF
 		L_TAG='$L_TAG'
 		L_SERIAL='$L_SERIAL'

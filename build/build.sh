@@ -60,13 +60,14 @@ GHU_OPENWRT='$V'
 GHU_PROFILE='$PROFILE'
 EOF
 
-# 3) Image Builder: default + device packages + LuCI (with HTTPS, as in official images), our files
+# 3) Image Builder: default + device packages + LuCI (with HTTPS, as in official images) + zsh and
+#    zoneinfo-america (used on this AP; installing them via apk would not survive upgrades), our files
 #    on top. Attended Sysupgrade is deliberately not included (see verify.sh).
 chmod -R a+rX "$FILES"
 mkdir -p "$WORK/bin"; chmod 0777 "$WORK/bin"
 docker run --rm --platform linux/amd64 \
 	-v "$FILES:/builder/files:ro" -v "$WORK/bin:/builder/bin" \
-	"$IB" make image PROFILE="$PROFILE" PACKAGES="luci luci-ssl" FILES=files EXTRA_IMAGE_NAME="b$SERIAL" \
+	"$IB" make image PROFILE="$PROFILE" PACKAGES="luci luci-ssl zsh zoneinfo-america" FILES=files EXTRA_IMAGE_NAME="b$SERIAL" \
 	> "$OUT/imagebuilder.log" 2>&1 || { tail -40 "$OUT/imagebuilder.log" >&2; die "image builder failed"; }
 
 src=$WORK/bin/targets/$TARGET
