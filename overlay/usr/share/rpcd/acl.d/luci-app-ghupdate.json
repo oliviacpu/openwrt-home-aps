@@ -13,6 +13,7 @@
 		"write": {
 			"file": {
 				"/usr/sbin/ghupdate check": [ "exec" ],
+				"/usr/sbin/ghupdate start": [ "exec" ],
 				"/usr/sbin/ghupdate prepare": [ "exec" ],
 				"/usr/sbin/ghupdate apply": [ "exec" ]
 			},

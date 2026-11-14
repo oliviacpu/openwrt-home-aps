@@ -5,6 +5,7 @@
 #   ghupdate prepare   download the newer image; verify signature, checksum, sysupgrade -T
 #   ghupdate apply     flash the prepared image (settings kept; the device reboots)
 #   ghupdate install   prepare + apply
+#   ghupdate start     prepare in the background, return at once (used by the web UI)
 #   ghupdate auto      check, then install if the auto-install rules allow it (cron, hourly)
 #   ghupdate status    print the status JSON
 #
@@ -230,11 +231,21 @@ take_lock() {
 }
 release_lock() { [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCKDIR"; }
 
+lock_busy() { [ -d "$LOCKDIR" ] && kill -0 "$(cat "$LOCKDIR/pid" 2>/dev/null)" 2>/dev/null; }
+
 cmd=${1:-}
 case "$cmd" in
 	status) cat "$STATUS" 2>/dev/null || echo '{"state":"unknown"}'; exit 0 ;;
+	start)
+		# For the web UI: run 'prepare' detached and return at once. The UI polls status.json for
+		# downloading -> ready | error, so no single request has to outlive LuCI's RPC timeout.
+		lock_busy && { echo "another ghupdate run is in progress" >&2; exit 75; }
+		rm -f "$READY"
+		write_status downloading "Starting download"
+		setsid "$0" prepare </dev/null >/dev/null 2>&1 &
+		exit 0 ;;
 	check|prepare|apply|install|auto) ;;
-	*) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+	*) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
 
 take_lock || { echo "another ghupdate run is in progress" >&2; exit 75; }

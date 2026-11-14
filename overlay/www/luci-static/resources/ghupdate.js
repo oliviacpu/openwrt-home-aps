@@ -45,7 +45,34 @@ return baseclass.extend({
 		return fs.exec(CMD, [ 'check' ]).then(function(res) {
 			if (res.code !== 0)
 				ui.addNotification(null, E('p', esc(_('Update check failed: %s').format((res.stderr || '').trim()))), 'warning');
+		}).catch(function() {}).then(function() {
 			window.location.reload();
+		});
+	},
+
+	// Poll status.json until the background 'prepare' finishes. Resolves on 'ready', rejects on
+	// 'error', 'up-to-date' or timeout. Each poll is a quick file read, so no RPC call runs long.
+	waitPrepared: function(progressEl, deadline) {
+		var self = this;
+		return new Promise(function(resolve, reject) {
+			(function poll() {
+				self.load().then(function(st) {
+					var s = st && st.state;
+					if (st && st.message)
+						progressEl.textContent = st.message + '…';
+					if (s === 'ready')
+						return resolve(st);
+					if (s === 'error')
+						return reject(new Error(st.message || _('unknown error')));
+					if (s === 'up-to-date')
+						return reject(new Error(_('There is no newer build to install.')));
+					if (Date.now() > deadline)
+						return reject(new Error(_('Timed out after 5 minutes waiting for the download.')));
+					window.setTimeout(poll, 2000);
+				}).catch(function() {
+					window.setTimeout(poll, 2000);
+				});
+			})();
 		});
 	},
 
@@ -60,23 +87,32 @@ return baseclass.extend({
 	},
 
 	doInstall: function() {
+		var self = this,
+		    progress = E('span', {}, [ _('Starting…') ]);
+
 		ui.showModal(_('Preparing update…'), [
-			E('p', { 'class': 'spinning' }, _('Downloading the image and checking its signature and checksum.'))
+			E('p', { 'class': 'spinning' }, [ progress ]),
+			E('p', { 'style': 'opacity:.7' }, _('Downloading the image and checking its signature and checksum. This usually takes under a minute; nothing changes on the device until it is verified.'))
 		]);
-		return fs.exec(CMD, [ 'prepare' ]).then(function(res) {
-			if (res.code !== 0) {
-				ui.hideModal();
-				ui.addNotification(null, [
-					E('p', _('The update was not installed.')),
-					E('pre', {}, [ (res.stderr || res.stdout || '').trim() ])
-				], 'danger');
-				return;
-			}
+
+		return fs.exec(CMD, [ 'start' ]).then(function(res) {
+			if (res.code !== 0)
+				throw new Error((res.stderr || res.stdout || '').trim() || ('exit code ' + res.code));
+			return self.waitPrepared(progress, Date.now() + 5 * 60 * 1000);
+		}).then(function() {
 			ui.showModal(_('Flashing…'), [
 				E('p', { 'class': 'spinning' }, _('The system is flashing now.<br /> DO NOT POWER OFF THE DEVICE!<br /> This page reconnects by itself when the access point is back, usually within three minutes.'))
 			]);
-			fs.exec(CMD, [ 'apply' ]);
+			fs.exec(CMD, [ 'apply' ]).catch(function() {});   // the connection drops as it flashes
 			ui.awaitReconnect(window.location.host);
+		}).catch(function(err) {
+			ui.showModal(_('Update not installed'), [
+				E('p', _('The update was not installed. The device is unchanged.')),
+				E('pre', {}, [ String((err && err.message) || err) ]),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'btn', 'click': function() { ui.hideModal(); window.location.reload(); } }, [ _('Close') ])
+				])
+			]);
 		});
 	},
 
