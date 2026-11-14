@@ -44,6 +44,7 @@ cleanup() {
 trap cleanup EXIT
 FILES=$WORK/files
 mkdir -p "$FILES" "$OUT"
+OUT=$(cd "$OUT" && pwd)   # absolute: docker -v treats a relative source as a named volume
 
 # ---------- 1) files: shared overlay, then the device's own on top ----------
 cp -a "$ROOT/overlay/common/." "$FILES/"
