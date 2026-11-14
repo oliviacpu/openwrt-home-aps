@@ -38,6 +38,11 @@ done
 check "LuCI and wpad installed"             "grep -qx 'P:luci-base' '$R/lib/apk/db/installed' && grep -q '^P:wpad' '$R/lib/apk/db/installed'"
 check "LuCI HTTPS (luci-ssl) installed"     "grep -qx 'P:luci-ssl' '$R/lib/apk/db/installed'"
 check "zsh + zoneinfo-america installed"    "grep -qx 'P:zsh' '$R/lib/apk/db/installed' && grep -qx 'P:zoneinfo-america' '$R/lib/apk/db/installed' && test -x '$R/usr/bin/zsh'"
+for p in htop tcpdump-mini iperf3 curl nano tmux mtr-nojson ethtool drill lldpd usteer luci-app-usteer prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi_stations; do
+	check "package $p installed"            "grep -qx 'P:$p' '$R/lib/apk/db/installed'"
+done
+check "one-time AP defaults script"         "test -x '$R/etc/uci-defaults/97-ap-defaults'"
+check "image fits the firmware partition"   "[ \$(stat -c %s '$img' 2>/dev/null || stat -f %z '$img') -lt 39845888 ]"
 
 if [ -n "$OFFICIAL" ]; then
 	mkdir "$W/o"; tar -xf "$OFFICIAL" -C "$W/o"

@@ -13,6 +13,14 @@ IB=ghcr.io/openwrt/imagebuilder:${TARGET/\//-}-v$V
 TAG=openwrt-$V-b$SERIAL
 PI_IP=192.168.255.1
 PI_BCAST=192.168.255.255
+# Packages on top of the defaults. Anything meant to survive auto-updates must be listed here.
+PACKAGES="luci luci-ssl"                                           # web UI, http + https
+PACKAGES="$PACKAGES zsh zoneinfo-america"                          # shell and full timezone data
+PACKAGES="$PACKAGES htop tcpdump-mini iperf3 curl nano tmux"       # everyday CLI tools
+PACKAGES="$PACKAGES mtr-nojson ethtool drill lldpd"                # network diagnostics; LLDP to the switch
+PACKAGES="$PACKAGES usteer luci-app-usteer"                        # band steering / roaming between APs
+PACKAGES="$PACKAGES prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi"
+PACKAGES="$PACKAGES prometheus-node-exporter-lua-wifi_stations prometheus-node-exporter-lua-hostapd_stations"
 die() { echo "build: $*" >&2; exit 1; }
 
 if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${USIGN_SECRET_KEY:-}" ]; then
@@ -67,7 +75,7 @@ chmod -R a+rX "$FILES"
 mkdir -p "$WORK/bin"; chmod 0777 "$WORK/bin"
 docker run --rm --platform linux/amd64 \
 	-v "$FILES:/builder/files:ro" -v "$WORK/bin:/builder/bin" \
-	"$IB" make image PROFILE="$PROFILE" PACKAGES="luci luci-ssl zsh zoneinfo-america" FILES=files EXTRA_IMAGE_NAME="b$SERIAL" \
+	"$IB" make image PROFILE="$PROFILE" PACKAGES="$PACKAGES" FILES=files EXTRA_IMAGE_NAME="b$SERIAL" \
 	> "$OUT/imagebuilder.log" 2>&1 || { tail -40 "$OUT/imagebuilder.log" >&2; die "image builder failed"; }
 
 src=$WORK/bin/targets/$TARGET

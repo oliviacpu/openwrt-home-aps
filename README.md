@@ -27,6 +27,25 @@ installed with `apk` don't survive a sysupgrade, so anything that should stay be
    image checksum and `sysupgrade -T`, then upgrades with settings kept. OpenWrt's Attended Sysupgrade is
    deliberately left out, because it would offer official images without fix 1.
 
+## Extras baked in
+
+Everything in `PACKAGES` ([`build/build.sh`](build/build.sh)) is in every build, so nothing has to be
+reinstalled after an update:
+
+| Package(s) | What for |
+|---|---|
+| `luci`, `luci-ssl` | Web UI on http **and** https (no forced redirect) |
+| `zsh`, `zoneinfo-america` | Shell; full timezone data |
+| `htop`, `tmux`, `nano`, `curl`, `iperf3`, `tcpdump-mini` | Everyday CLI |
+| `mtr-nojson`, `ethtool`, `drill` | Network diagnostics: per-hop loss, link/PoE port errors, DNS queries |
+| `lldpd` | Announces the AP to the switch via LLDP/CDP (name, IP, model, port) |
+| `usteer`, `luci-app-usteer` | Band steering and roaming coordination between APs on the same SSID |
+| `prometheus-node-exporter-lua` (+ `-wifi`, `-wifi_stations`, `-hostapd_stations`) | Metrics at `http://<ap-address>:9100/metrics`, including per-client Wi-Fi signal/rates. Set to listen on LAN once, on first install. |
+
+Also included: a fix for NTP on dumb APs ([`95-resolv-for-jails`](overlay/etc/hotplug.d/iface/95-resolv-for-jails)).
+With dnsmasq off, the sandboxed `sysntpd` can't follow the `/tmp/resolv.conf` symlink and never sets
+the clock.
+
 ## Using it
 
 - **Overview page**: Status → Overview shows a *Firmware Updates* box with **Install now** when a
