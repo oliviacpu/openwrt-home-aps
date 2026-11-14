@@ -61,6 +61,26 @@ tx_pct() {  # percent of tx packets that were retries ($2=retries) or failed ($2
 		/tx packets:/ { p += $3 } /tx retries:/ { r += $3 } /tx failed:/ { f += $3 }
 		END { if (p > 0) printf "%.1f", ((k == "retries") ? r : f) * 100 / p }'
 }
+usteer_peers() {  # distinct remote usteer hosts this AP sees (one host has a node per radio, "<ip>#<node>")
+	ubus call usteer remote_info 2>/dev/null | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | cut -d'#' -f1 | sort -u | wc -l
+}
+lldp_neighbors() {  # every LLDP/CDP neighbour, "<name> <port> (<via>)" joined by "; ". CDP frames are
+	# forwarded by plain bridges, so a far device can show up next to the real uplink switch.
+	command -v lldpcli >/dev/null 2>&1 || return
+	lldpcli -f keyvalue show neighbors 2>/dev/null | awk -F= '
+		function flush() { if (name != "") { out = out (out == "" ? "" : "; ") name " " port " (" via ")" } name = port = "" }
+		/\.via=/ { flush(); via = $2 } /\.chassis\.name=/ { name = $2 } /\.port\.descr=/ { port = $2 }
+		END { flush(); printf "%s", out }'
+}
+firmware_json() {  # Netgear image updates (ghupdate) for a read-only MQTT update entity
+	command -v ghupdate >/dev/null 2>&1 || return
+	GHU_SERIAL=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
+	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial')"
+	inst="build ${GHU_SERIAL:-?}"; latest=$inst
+	case "$UA" in true|1) [ -n "$LS" ] && latest="build $LS" ;; esac
+	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","release_summary":"ghupdate state: %s"}\n' \
+		"$inst" "$latest" "$NAME" "${ST:-unknown}"
+}
 signals() { for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
 	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k; break } }'; }
 uplink() { for p in lan eth0; do [ -r "/sys/class/net/$p/speed" ] && { echo "$p"; return; }; done; }
@@ -85,6 +105,7 @@ state() {
 	printf '"roams_in":%s,"roams_out":%s,' "$(num "$(usteer_roams target)")" "$(num "$(usteer_roams source)")"
 	printf '"weak_clients":%s,"weakest_dbm":%s,' "$(num "$weak")" "$(num "$weakest")"
 	printf '"uplink_mbps":%s,"uplink_flaps":%s,' "$(num "$(cat "/sys/class/net/$up/speed" 2>/dev/null)")" "$(num "$(cat "/sys/class/net/$up/carrier_changes" 2>/dev/null)")"
+	printf '"roam_peers":%s,"lldp_neighbors":%s,' "$(num "$(usteer_peers)")" "$(str "$(lldp_neighbors)")"
 	printf '"mode":%s,"switch":%s,"firmware":%s' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
 	printf '}\n'
 }
@@ -112,6 +133,8 @@ weak_clients|Weak clients|||measurement|mdi:wifi-strength-1-alert
 weakest_dbm|Weakest client signal|dBm|signal_strength|measurement|
 uplink_mbps|Uplink speed|Mbit/s|data_rate|measurement|
 uplink_flaps|Uplink link changes|||total_increasing|mdi:ethernet-cable-off
+roam_peers|Roaming peers|||measurement|mdi:access-point-network
+lldp_neighbors|LLDP/CDP neighbours||||mdi:switch
 mode|Mode||||mdi:airplane-cog
 switch|Side switch position||||mdi:toggle-switch-outline
 firmware|Firmware||||mdi:package-variant'
@@ -130,6 +153,10 @@ discovery() {  # prints "topic<TAB>payload" lines
 		printf '%s/sensor/%s/%s/config\t{"name":"%s","unique_id":"%s_%s","default_entity_id":"sensor.%s_%s","state_topic":"%s","value_template":"{{ value_json.%s }}","expire_after":%s%s,"device":%s}\n' \
 			"$DPREFIX" "$NODE" "$key" "$name" "$NODE" "$key" "$NODE" "$key" "$STATE_TOPIC" "$key" $((INTERVAL * 3)) "$extra" "$dev"
 	done
+	if command -v ghupdate >/dev/null 2>&1; then  # read-only: no command_topic, so HA can't trigger a flash
+		printf '%s/update/%s/firmware/config\t{"name":"Firmware","unique_id":"%s_firmware_update","default_entity_id":"update.%s_firmware","state_topic":"%s/%s/firmware","device_class":"firmware","device":%s}\n' \
+			"$DPREFIX" "$NODE" "$NODE" "$NODE" "$TPREFIX" "$NODE" "$dev"
+	fi
 }
 
 # ---------- publishing ----------
@@ -152,6 +179,7 @@ case "${1:-run}" in
 	dry-run)
 		discovery | sed 's/\t/  /'
 		echo "$STATE_TOPIC  $(state)"
+		fw=$(firmware_json); [ -n "$fw" ] && echo "$TPREFIX/$NODE/firmware  $fw"
 		;;
 	run)
 		[ "$(cfg enabled)" = 1 ] || { logger -t ha-mqtt "disabled in /etc/config/ha_mqtt"; exit 0; }
@@ -164,6 +192,7 @@ case "${1:-run}" in
 				discovery | while IFS="$(printf '\t')" read -r t p; do pub "$t" "$p" retain; done
 			fi
 			pub "$STATE_TOPIC" "$(state)" || logger -t ha-mqtt "publish failed"
+			fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
 			n=$((n + 1)); sleep "$INTERVAL"
 		done
 		;;
