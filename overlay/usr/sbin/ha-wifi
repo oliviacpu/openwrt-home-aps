@@ -1,0 +1,50 @@
+#!/bin/sh
+# Values for Home Assistant, read over SNMP (snmpd extend, one per argument).
+# The same file runs on the Beryl and the Netgear. Access points are found by band (2g/5g)
+# from netifd's live wireless status, so any ifnames work and uplink (client-mode)
+# interfaces, like a hotel Wi-Fi uplink in Away mode, are ignored. Weak = below -70 dBm.
+radio() { uci show wireless | sed -n "s/^wireless\.\([^.]*\)\.band='$1'$/\1/p" | head -n 1; }
+aps() {  # access-point ifnames for each band given
+  for b in "$@"; do
+    r=$(radio "$b"); [ -n "$r" ] || continue
+    ubus call network.wireless status | jsonfilter -e "@.$r.interfaces[@.config.mode=\"ap\"].ifname" 2>/dev/null
+  done
+}
+up() { [ "$(cat "/sys/class/net/$1/operstate" 2>/dev/null)" = up ]; }
+stations() {  # "dBm MAC" for every station on the access points of the given bands
+  for i in $(aps "$@"); do
+    up "$i" || continue
+    iwinfo "$i" assoclist 2>/dev/null |
+      awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k, $1; break } }'
+  done
+}
+chan() {  # "6 / 20 MHz", or Off
+  r=$(radio "$1"); i=$(aps "$1" | head -n 1)
+  { [ -n "$i" ] && up "$i"; } || { echo Off; return; }
+  w=$(uci -q get wireless.$r.htmode | tr -dc 0-9)
+  echo "$(uci -q get wireless.$r.channel) / ${w:-20} MHz"
+}
+fan() {  # RPM from a pwm-fan tachometer, if the device has one (the Beryl does)
+  for h in /sys/class/hwmon/hwmon*; do
+    [ "$(cat "$h/name" 2>/dev/null)" = pwmfan ] && { cat "$h/fan1_input"; return; }
+  done
+}
+uplink() {  # physical uplink port speed; on DSA switches (Netgear) the port is "lan"
+  for p in lan eth0; do
+    [ -r "/sys/class/net/$p/speed" ] && { cat "/sys/class/net/$p/speed"; return; }
+  done
+}
+case "$1" in
+  fan) fan ;;
+  clients24) stations 2g | wc -l ;;
+  clients5) stations 5g | wc -l ;;
+  weak) stations 2g 5g | awk '$1 < -70' | wc -l ;;
+  weakest) stations 2g 5g | sort -n | head -1 | cut -d' ' -f1 ;;
+  weaknames)  # "MAC=dBm,..." for stations below -70 dBm, weakest first (at most 8)
+    stations 2g 5g | awk '$1 < -70' | sort -n | head -8 |
+      awk '{ printf "%s%s=%s", (NR > 1 ? "," : ""), $2, $1 } END { if (NR) print "" }' ;;
+  chan24) chan 2g ;;
+  chan5) chan 5g ;;
+  uplink) uplink ;;
+  firmware) . /etc/openwrt_release && echo "OpenWrt $DISTRIB_RELEASE" ;;
+esac
