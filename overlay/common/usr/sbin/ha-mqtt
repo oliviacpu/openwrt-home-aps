@@ -98,6 +98,7 @@ firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	case "$UA" in true|1) [ -n "$LS" ] && latest="build $LS" ;; esac
 	prog=false; case "$ST" in downloading|ready|installing) prog=true ;; esac
 	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
+	case "$ST" in ''|unknown) sum="Checking for updates" ;; esac   # just booted: ghupdate hasn't checked yet
 	sum=$(printf '%s' "$sum" | cut -c1-250)   # HA's release_summary limit is 255
 	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","in_progress":%s,"release_url":%s,"release_summary":"%s"}\n' \
 		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$prog" "$(str "$LU")" "$(esc "$sum")"
@@ -111,6 +112,21 @@ signals() {  # "dBm MAC" for every station on this AP's access points (same as h
 	for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
 	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k, $1; break } }'; }
 uplink() { for p in lan eth0; do [ -r "/sys/class/net/$p/speed" ] && { echo "$p"; return; }; done; }
+flash() {  # "<free MB> <use %>" of the writable overlay (where settings and installed extras live)
+	df -Pk /overlay 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { sub(/%$/, "", $5); print int($4 / 1024), $5 }'
+}
+tailnet() {  # sets TS_* from `tailscale status --json`; all empty when tailscale or tailscaled is absent.
+	# jsonfilter exports arrays as their indexes, so array elements are read with [*].
+	TS_STATE= TS_IP= TS_PEERS= TS_HEALTH= TS_EXIT=
+	command -v tailscale >/dev/null 2>&1 || return 0
+	ts=$(tailscale status --json 2>/dev/null); [ -n "$ts" ] || return 0
+	TS_STATE=$(jsonfilter -s "$ts" -e '@.BackendState' 2>/dev/null)
+	TS_IP=$(jsonfilter -s "$ts" -e '@.Self.TailscaleIPs[*]' 2>/dev/null | grep -v : | head -n 1)
+	TS_PEERS=$(jsonfilter -s "$ts" -e '@.Peer[*].Online' 2>/dev/null | grep -c '^true$')
+	TS_HEALTH=$(jsonfilter -s "$ts" -e '@.Health[*]' 2>/dev/null | awk '{ printf "%s%s", (NR > 1 ? "; " : ""), $0 }' | cut -c1-250)
+	TS_EXIT=$(jsonfilter -s "$ts" -e '@.ExitNodeStatus.Online' 2>/dev/null)
+}
+bool() { case "$1" in '') echo null ;; true|1) echo true ;; *) echo false ;; esac; }   # JSON boolean or null
 
 # ---------- one state message ----------
 state() {
@@ -126,6 +142,16 @@ state() {
 	mode=; [ -r /etc/beryl-mode/current ] && mode=$(cat /etc/beryl-mode/current)
 	sw=$(sed -n 's/.*|mode *) in *\([a-z]*\).*/\1/p' /sys/kernel/debug/gpio 2>/dev/null | head -n 1)
 	. /etc/openwrt_release
+	set -- $(flash)
+	tailnet
+	tscon=; tsprob=; tsexit=
+	if [ -n "$TS_STATE" ]; then
+		[ "$TS_STATE" = Running ] && tscon=true || tscon=false
+		# Home mode turns --accept-routes off on purpose (monochrome advertises the home LAN), and
+		# Tailscale lists that as a health message. It stays in tailnet_health, but isn't a problem.
+		echo "$TS_HEALTH" | sed 's/; /\n/g' | grep -v 'advertising routes but --accept-routes is false' | grep -q . && tsprob=true || tsprob=false
+		[ "$TS_EXIT" = true ] && tsexit=true || tsexit=false
+	fi
 	printf '{'
 	printf '"temp_cpu":%s,' "$(temp "$(hwmon_temp cpu_thermal)")"
 	printf '"temp_wifi_2g":%s,"temp_wifi_5g":%s,' "$(temp "$(wifi_temp 2g)")" "$(temp "$(wifi_temp 5g)")"
@@ -140,6 +166,10 @@ state() {
 	printf '"weak_client_count":%s,"weakest_dbm":%s,"weak_macs":%s,' "$(num "$weak")" "$(num "$weakest")" "$(str "$weakmacs")"
 	printf '"uplink_mbps":%s,"uplink_flaps":%s,' "$(num "$(cat "/sys/class/net/$up/speed" 2>/dev/null)")" "$(num "$(cat "/sys/class/net/$up/carrier_changes" 2>/dev/null)")"
 	printf '"roam_peers":%s,"lldp_neighbors":%s,' "$(num "$(usteer_peers)")" "$(str "$(lldp_neighbors)")"
+	printf '"flash_free_mb":%s,"flash_usage_pct":%s,' "$(num "${1:-}")" "$(num "${2:-}")"
+	printf '"tailnet_connected":%s,"tailnet_state":%s,"tailnet_ip":%s,"tailnet_peers_online":%s,' \
+		"$(bool "$tscon")" "$(str "$TS_STATE")" "$(str "$TS_IP")" "$(num "$([ -n "$TS_STATE" ] && echo "$TS_PEERS")")"
+	printf '"tailnet_problem":%s,"tailnet_health":%s,"tailnet_exit_node":%s,' "$(bool "$tsprob")" "$(str "$TS_HEALTH")" "$(bool "$tsexit")"
 	printf '"mode":%s,"switch":%s,"openwrt_version":%s' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
 	printf '}\n'
 }
@@ -172,7 +202,19 @@ roam_peers|Roaming peers|||measurement|mdi:access-point-network
 lldp_neighbors|LLDP/CDP neighbours||||mdi:switch
 mode|Mode||||mdi:airplane-cog
 switch|Side switch position||||mdi:toggle-switch-outline
-openwrt_version|OpenWrt version||||mdi:package-variant'
+openwrt_version|OpenWrt version||||mdi:package-variant
+flash_free_mb|Flash free|MB|data_size|measurement|mdi:harddisk
+flash_usage_pct|Flash used|%||measurement|mdi:harddisk'
+# Tailscale (only where it's installed: the Beryl). Keys say "tailnet" because HA's old
+# openwrt-integration Tailscale entities still own the beryl_tailscale_* entity ids.
+TS_SENSORS='tailnet_state|Tailscale state||||mdi:vpn
+tailnet_ip|Tailscale IP||||mdi:ip-network
+tailnet_peers_online|Tailscale peers online|||measurement|mdi:account-network
+tailnet_health|Tailscale health messages||||mdi:message-alert-outline'
+# key|name|device_class|icon (binary sensors: ON/OFF, unknown when the value is null)
+TS_BINARY='tailnet_connected|Tailscale connected|connectivity|
+tailnet_problem|Tailscale problem|problem|
+tailnet_exit_node|Tailscale exit node in use||mdi:location-exit'
 # Keys renamed since the first release (they collided with older SNMP/template entity ids in HA).
 # Their retained discovery configs are cleared at startup, which removes the stale entities in HA.
 RETIRED='sensor/weak_clients sensor/firmware'
@@ -184,7 +226,9 @@ discovery() {  # prints "topic<TAB>payload" lines; uses $LANIP (may be empty: th
 	url=; [ -n "$LANIP" ] && url=$(printf ',"configuration_url":"http://%s/"' "$(esc "$LANIP")")
 	dev=$(printf '{"identifiers":["openwrt_ap_%s"],"name":"%s","model":"%s","manufacturer":"%s","sw_version":"%s"%s}' \
 		"$NODE" "$(esc "$NAME")" "$(esc "$model")" "$(esc "${model%% *}")" "$(. /etc/openwrt_release; esc "OpenWrt $DISTRIB_RELEASE")" "$url")
-	echo "$SENSORS" | while IFS='|' read -r key name unit dclass sclass icon; do
+	sensors=$SENSORS; command -v tailscale >/dev/null 2>&1 && sensors="$SENSORS
+$TS_SENSORS"
+	echo "$sensors" | while IFS='|' read -r key name unit dclass sclass icon; do
 		extra=
 		[ -n "$unit" ] && extra="$extra,\"unit_of_measurement\":\"$unit\""
 		[ -n "$dclass" ] && extra="$extra,\"device_class\":\"$dclass\""
@@ -193,6 +237,15 @@ discovery() {  # prints "topic<TAB>payload" lines; uses $LANIP (may be empty: th
 		printf '%s/sensor/%s/%s/config\t{"name":"%s","unique_id":"%s_%s","default_entity_id":"sensor.%s_%s","state_topic":"%s","value_template":"{{ value_json.%s }}","expire_after":%s%s,"device":%s}\n' \
 			"$DPREFIX" "$NODE" "$key" "$name" "$NODE" "$key" "$NODE" "$key" "$STATE_TOPIC" "$key" $((INTERVAL * 3)) "$extra" "$dev"
 	done
+	if command -v tailscale >/dev/null 2>&1; then
+		echo "$TS_BINARY" | while IFS='|' read -r key name dclass icon; do
+			extra=
+			[ -n "$dclass" ] && extra="$extra,\"device_class\":\"$dclass\""
+			[ -n "$icon" ] && extra="$extra,\"icon\":\"$icon\""
+			printf '%s/binary_sensor/%s/%s/config\t{"name":"%s","unique_id":"%s_%s","default_entity_id":"binary_sensor.%s_%s","state_topic":"%s","value_template":"{%% if value_json.%s is none %%}None{%% elif value_json.%s %%}ON{%% else %%}OFF{%% endif %%}","payload_on":"ON","payload_off":"OFF","expire_after":%s%s,"device":%s}\n' \
+				"$DPREFIX" "$NODE" "$key" "$name" "$NODE" "$key" "$NODE" "$key" "$STATE_TOPIC" "$key" "$key" $((INTERVAL * 3)) "$extra" "$dev"
+		done
+	fi
 	if command -v ghupdate >/dev/null 2>&1; then
 		# Install button only with remote-install (see remote_ok); otherwise read-only.
 		cmd=; remote_ok && cmd=$(printf ',"command_topic":"%s/%s/firmware/install","payload_install":"install"' "$TPREFIX" "$NODE")
@@ -299,7 +352,9 @@ case "${1:-run}" in
 				75) logger -t ha-mqtt "Home Assistant install request refused by ghupdate: busy or rate-limited (logread -e ghupdate)" ;;
 				*) logger -t ha-mqtt "Home Assistant install request: ghupdate remote-install failed (exit $rc)" ;;
 			esac
-			sleep 3; fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
+			# Own client id: sharing the publisher's would make the broker drop one of the two connections.
+			sleep 3; fw=$(firmware_json)
+			[ -n "$fw" ] && XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -i "ha-mqtt-$NODE-cmd" -t "$TPREFIX/$NODE/firmware" -m "$fw" -r -q 1
 		done
 		logger -t ha-mqtt "firmware command subscription ended; procd restarts it"
 		exit 1
