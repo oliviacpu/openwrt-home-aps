@@ -23,6 +23,7 @@ PACKAGES="$PACKAGES wpad-mbedtls -wpad-basic-mbedtls"             # full hostapd
 PACKAGES="$PACKAGES prometheus-node-exporter-lua prometheus-node-exporter-lua-wifi"
 PACKAGES="$PACKAGES prometheus-node-exporter-lua-wifi_stations prometheus-node-exporter-lua-hostapd_stations"
 PACKAGES="$PACKAGES snmpd-nossl"                                    # SNMP for Home Assistant (config + helper scripts live on the device)
+PACKAGES="$PACKAGES mosquitto-client-nossl"                         # MQTT client for the Home Assistant metrics publisher
 # Shell extras built/fetched from pinned upstream sources (no OpenWrt packages for them).
 POSH_VERSION=32.0.0                                       # Oh My Posh, cross-compiled for mipsle
 POSH_COMMIT=d01ca021d6ceb899e252884f3a95db5969a4b8fd      # = tag v32.0.0
