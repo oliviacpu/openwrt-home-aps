@@ -64,6 +64,7 @@ for p in $(sed -e 's/#.*//' "$ROOT/packages/common.txt" "$ROOT/packages/$PROFILE
 done
 check "full wpad (802.11k/v), no wpad-basic" "installed wpad-mbedtls && ! installed wpad-basic-mbedtls"
 check "Attended Sysupgrade / owut absent"   "! grep -qE '^P:(attendedsysupgrade-common|luci-app-attendedsysupgrade|owut)$' '$DB'"
+check "luci-mod-rpc absent (its sys.exec ignores the rpcd ACL; HA uses ubus)" "! installed luci-mod-rpc"
 check "Prometheus exporter absent"          "! grep -q '^P:prometheus-node-exporter' '$DB'"
 
 # --- shell, Home Assistant
