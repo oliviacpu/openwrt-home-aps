@@ -19,7 +19,15 @@ if [ -n "${GITHUB_ACTIONS:-}" ] && [ -z "${USIGN_SECRET_KEY:-}" ]; then
 	die "USIGN_SECRET_KEY secret is not set; refusing to publish unsigned builds"
 fi
 
-WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+WORK=$(mktemp -d)
+cleanup() {
+	local rc=$?
+	# Image Builder writes bin/ as its own container user; remove that from inside a container.
+	[ -d "$WORK/bin" ] && docker run --rm --platform linux/amd64 --user 0 -v "$WORK:/w" --entrypoint rm "$IB" -rf /w/bin >/dev/null 2>&1
+	rm -rf "$WORK" 2>/dev/null || true
+	exit "$rc"
+}
+trap cleanup EXIT
 FILES=$WORK/files
 mkdir -p "$FILES" "$OUT"
 cp -a "$ROOT/overlay/." "$FILES/"
