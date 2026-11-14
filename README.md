@@ -42,6 +42,7 @@ reinstalled after an update:
 | `usteer`, `luci-app-usteer`, `wpad-mbedtls` | Band steering and roaming between APs on the same SSID; full hostapd for 802.11v (replaces `wpad-basic-mbedtls`) |
 | Oh My Posh, Oh My Zsh (core), `/root/.zshrc`, `ap-status` | Root logs in to zsh with an Oh My Posh prompt and a status card (firmware, health, LLDP uplink, radios, roaming peers). Oh My Posh is built from a pinned upstream tag for mipsle/softfloat; Oh My Zsh is a pinned commit, core only. |
 | `snmpd-nossl`, `mosquitto-client-nossl`, `luci-mod-rpc`, `ha-wifi`/`ha-weaknames`/`cpu-busy` | Home Assistant: SNMP agent (with helper scripts for Wi-Fi clients, weak stations, channels, uplink and CPU), MQTT client, and the LuCI JSON-RPC endpoint used by HA's OpenWrt integration. Its config (community, allowed hosts) and helper scripts stay on the device, kept across updates, and are never in this public repo. |
+| `ha-mqtt` (+ `/etc/config/ha_mqtt`) | Publishes AP health to Home Assistant via MQTT discovery (temperatures, channel load/noise, clients, tx retries, roams, weak clients, uplink). Ships **disabled with no broker credentials**; set them on the device only (`/etc/config/ha_mqtt` is kept across updates). |
 | `prometheus-node-exporter-lua` (+ `-wifi`, `-wifi_stations`, `-hostapd_stations`) | Metrics at `http://<ap-address>:9100/metrics`, including per-client Wi-Fi signal/rates. Set to listen on LAN once, on first install. |
 
 Also included: a fix for NTP on dumb APs ([`95-resolv-for-jails`](overlay/etc/hotplug.d/iface/95-resolv-for-jails)).
