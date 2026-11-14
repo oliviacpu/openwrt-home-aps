@@ -242,7 +242,10 @@ case "$cmd" in
 		lock_busy && { echo "another ghupdate run is in progress" >&2; exit 75; }
 		rm -f "$READY"
 		write_status downloading "Starting download"
-		setsid "$0" prepare </dev/null >/dev/null 2>&1 &
+		# start-stop-daemon -b fully daemonizes: new session, stdio on /dev/null and inherited fds
+		# closed. rpcd's file.exec waits for its pipes to close, so a plain '&' would hold the
+		# request open until the whole download finished.
+		start-stop-daemon -S -b -x /usr/sbin/ghupdate -- prepare
 		exit 0 ;;
 	check|prepare|apply|install|auto) ;;
 	*) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
