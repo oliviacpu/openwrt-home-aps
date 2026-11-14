@@ -1,0 +1,12 @@
+# Packages in EVERY AP image (one list, so shared packages resolve to the same versions on all
+# devices; the publish step fails if they don't). Anything installed later with apk is gone after
+# the next update, so keepers belong here. Comments and blank lines are ignored.
+
+luci luci-ssl luci-mod-rpc               # web UI (http + https); JSON-RPC for Home Assistant's openwrt integration
+zsh zoneinfo-america                     # root shell; full timezone data
+htop tmux nano curl iperf3 tcpdump-mini  # everyday CLI
+mtr-nojson ethtool drill lldpd           # diagnostics; LLDP/CDP to the switch
+usteer luci-app-usteer                   # roaming / band steering between the APs
+wpad-mbedtls -wpad-basic-mbedtls hostapd-utils  # full hostapd: 802.11k/v; hostapd_cli for roaming debugging
+mosquitto-client-nossl                   # MQTT (ha-mqtt publisher, HA install trigger)
+snmpd-nossl                              # TEMPORARY: until Home Assistant has moved off SNMP (Phase B2)

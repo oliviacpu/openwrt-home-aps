@@ -40,7 +40,7 @@ return view.extend({
 		o.depends('auto', '1');
 
 		o = s.option(form.Value, 'repo', _('GitHub repository'));
-		o.placeholder = 'oliviacpu/openwrt-wax214v2';
+		o.placeholder = 'oliviacpu/openwrt-home-aps';
 		o.datatype = 'string';
 
 		return m.render().then(function(mapEl) {

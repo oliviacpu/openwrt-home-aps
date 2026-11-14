@@ -1,0 +1,29 @@
+#!/bin/sh
+# Shared roaming policy for every AP: hints only, ZERO forced disconnects.
+# - The installed usteer (2025.10.04~1d6524c6) hard-kicks 10 s after any roam trigger, so
+#   roam_scan_snr / roam_trigger_snr stay 0 there. Band steering only sends 802.11v requests.
+# - aggressiveness 1 (passive BSS-TM, never a kick) is ignored by that usteer and required by newer
+#   ones, whose default (3) kicks even for band steering.
+# Versioned: applied once per POLICY value, so local tuning survives later upgrades.
+# Runs at boot, before usteer starts. Doesn't touch whether usteer is enabled (the Beryl's Home/Away
+# switch owns that).
+POLICY=1
+[ "$(uci -q get ghupdate.main.usteer_policy)" = "$POLICY" ] && exit 0
+uci -q get 'usteer.@usteer[0]' >/dev/null || exit 0
+S='usteer.@usteer[0]'
+uci set "$S.network=lan"
+uci set "$S.local_mode=0"
+uci set "$S.ipv6=0"
+uci set "$S.syslog=1"
+uci set "$S.aggressiveness=1"
+uci -q delete "$S.aggressiveness_mac_list"
+uci set "$S.min_snr=0"
+uci set "$S.load_kick_enabled=0"
+uci set "$S.roam_scan_snr=0"
+uci set "$S.roam_trigger_snr=0"
+uci set "$S.signal_diff_threshold=12"
+uci set "$S.band_steering_threshold=5"
+uci commit usteer
+uci set ghupdate.main.usteer_policy="$POLICY"
+uci commit ghupdate
+exit 0

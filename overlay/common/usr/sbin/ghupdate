@@ -31,7 +31,7 @@ UA="ghupdate/1 (OpenWrt)"
 mkdir -p "$RUN"
 
 cfg() { local v; v=$(uci -q get "ghupdate.main.$1"); [ -n "$v" ] && echo "$v" || echo "$2"; }
-REPO=$(cfg repo oliviacpu/openwrt-wax214v2)
+REPO=$(cfg repo oliviacpu/openwrt-home-aps)
 AUTO=$(cfg auto 1)
 SOAK_DAYS=$(cfg soak_days 3)
 HOUR=$(cfg hour 4)
@@ -40,12 +40,13 @@ case "$SOAK_DAYS" in ''|*[!0-9]*) SOAK_DAYS=3 ;; esac
 case "$HOUR" in ''|*[!0-9]*) HOUR=4 ;; esac
 
 # Installed build (baked into the image by the build pipeline)
-GHU_TAG=unknown GHU_SERIAL=0 GHU_OPENWRT=unknown GHU_PROFILE=unknown
+GHU_TAG=unknown GHU_SERIAL=0 GHU_OPENWRT=unknown GHU_PROFILE=unknown GHU_DEVKEY=''
 [ -r "$BUILD_INFO" ] && . "$BUILD_INFO"
 
 # Latest release seen by the last successful check (values validated before being written)
-L_TAG='' L_SERIAL=0 L_OPENWRT='' L_PUBLISHED=0 L_URL='' L_IMG_URL='' L_IMG_NAME='' L_SUMS_URL='' L_SIG_URL='' L_CHECKED=0
+L_TAG='' L_SERIAL=0 L_OPENWRT='' L_PUBLISHED=0 L_URL='' L_IMG_URL='' L_IMG_NAME='' L_SUMS_URL='' L_SIG_URL='' L_CHECKED=0 L_DEVKEY=''
 [ -r "$LATEST" ] && . "$LATEST"
+INHIBIT_DIR=/etc/ghupdate/inhibit.d
 
 now()      { date +%s; }
 clock_ok() { [ "$(date +%Y)" -ge 2026 ]; }
@@ -53,15 +54,33 @@ series()   { echo "$1" | cut -d. -f1-2; }
 clean()    { echo "$*" | tr -cd 'A-Za-z0-9 ._:/()+,=@-' | cut -c1-300; }
 log()      { logger -t "$NAME" -- "$*"; echo "$*" >&2; }
 
-update_available() { [ "$L_SERIAL" -gt "$GHU_SERIAL" ] 2>/dev/null; }
+# A newer build only counts if THIS device's image actually changed: releases cover several devices,
+# and each carries a per-device content key (devkey). Without keys, fall back to the serial alone.
+update_available() {
+	[ "$L_SERIAL" -gt "$GHU_SERIAL" ] 2>/dev/null || return 1
+	[ -n "$L_DEVKEY" ] && [ -n "$GHU_DEVKEY" ] && [ "$L_DEVKEY" = "$GHU_DEVKEY" ] && return 1
+	return 0
+}
+
+# Inhibit hooks (/etc/ghupdate/inhibit.d/*): an executable that exits 0 blocks automatic and
+# HA-triggered installs and prints the reason. "Install now" in LuCI is not affected.
+inhibit_reason() {
+	local f msg
+	for f in "$INHIBIT_DIR"/*; do
+		[ -x "$f" ] || continue
+		msg=$("$f" 2>/dev/null) && { clean "${msg:-blocked by ${f##*/}}"; return 0; }
+	done
+	return 1
+}
 
 # Why an available update will NOT be installed automatically (empty = it will be)
 auto_blocker() {
 	update_available || return 0
 	[ "$AUTO" = 1 ] || { echo "automatic install is off"; return 0; }
 	if [ "$AUTO_MAJOR" != 1 ] && [ "$(series "$L_OPENWRT")" != "$(series "$GHU_OPENWRT")" ]; then
-		echo "new release series $(series "$L_OPENWRT") needs a manual install"
+		echo "new release series $(series "$L_OPENWRT") needs a manual install"; return 0
 	fi
+	inhibit_reason
 }
 
 # Earliest moment auto-install may run: the soak period has passed AND it is the install hour.
@@ -120,7 +139,7 @@ asset_url() { echo "https://api.github.com/repos/$REPO/releases/assets/$1"; }
 fetch() { uclient-fetch -q -T 60 -U "$UA" --header='Accept: application/octet-stream' -O "$2" "$1" 2>/dev/null; }
 
 check() {
-	local json tag pub url u name v serial img='' imgname='' sums='' sig=''
+	local json tag pub url u name v serial img='' imgname='' sums='' sig='' dk
 	clock_ok || log "warning: system clock not set yet (NTP)"
 	json=$(uclient-fetch -q -T 30 -U "$UA" -O - "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null) \
 		|| die "cannot reach GitHub releases for $REPO"
@@ -149,9 +168,12 @@ check() {
 		case "$u" in ''|*[!0-9]*) die "release $tag has no signed image for $GHU_PROFILE" ;; esac
 	done
 
+	# This device's content key, published in the release notes as "devkey <profile> <hex>".
+	dk=$(jsonfilter -s "$json" -e '@.body' 2>/dev/null | sed -n "s/.*devkey $GHU_PROFILE \([0-9a-f]\{16,64\}\).*/\1/p" | head -n 1)
+
 	L_TAG=$tag L_OPENWRT=$v L_SERIAL=$serial L_PUBLISHED=$pub L_URL=$url
 	L_IMG_URL=$(asset_url "$img") L_IMG_NAME=$imgname L_CHECKED=$(now)
-	L_SUMS_URL=$(asset_url "$sums") L_SIG_URL=$(asset_url "$sig")
+	L_SUMS_URL=$(asset_url "$sums") L_SIG_URL=$(asset_url "$sig") L_DEVKEY=$dk
 	cat > "$LATEST.tmp" <<-EOF
 		L_TAG='$L_TAG'
 		L_SERIAL='$L_SERIAL'
@@ -163,6 +185,7 @@ check() {
 		L_SUMS_URL='$L_SUMS_URL'
 		L_SIG_URL='$L_SIG_URL'
 		L_CHECKED='$L_CHECKED'
+		L_DEVKEY='$L_DEVKEY'
 	EOF
 	mv "$LATEST.tmp" "$LATEST"
 

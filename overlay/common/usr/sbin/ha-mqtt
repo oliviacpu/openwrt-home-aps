@@ -7,7 +7,8 @@
 #   ha-mqtt dry-run    print the discovery configs and one state message, publish nothing
 #
 # Every sensor reads one key from a single JSON state topic, and has expire_after = 3 intervals.
-# Missing data (e.g. no 5 GHz AP, no fan) is published as null and shows as unknown in HA.
+# Missing or implausible data (no 5 GHz AP, no fan, a sensor that isn't ready) is published as null
+# and shows as unknown in HA.
 
 cfg() { uci -q get "ha_mqtt.main.$1"; }
 INTERVAL=$(cfg interval); INTERVAL=${INTERVAL:-60}
@@ -20,6 +21,11 @@ STATE_TOPIC="$TPREFIX/$NODE/state"
 
 # ---------- helpers ----------
 num() { [ -n "$1" ] && echo "$1" || echo null; }                # JSON number or null
+# mt7915 hwmon reads 0-1 degC until the radio's sensor is ready, so only 10-130 degC counts as real.
+temp() { awk -v t="$1" 'BEGIN { if (t ~ /^-?[0-9.]+$/ && t + 0 >= 10 && t + 0 <= 130) print t; else print "null" }'; }
+# usteer's channel load comes from the channel survey, where mt7915 reports busy time > active time
+# (seen: 643490 %), so only an integer 0-100 counts.
+pct() { case "$1" in ''|*[!0-9]*) echo null ;; *) [ "$1" -le 100 ] && echo "$1" || echo null ;; esac; }
 # JSON-escape: strip control characters, escape \ and ". Needed because some values come off the
 # wire (LLDP/CDP names advertised by other devices) and must not be able to break or inject JSON.
 esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -59,10 +65,16 @@ usteer_band() {  # field $2 (load, noise, n_assoc) of the usteer node on band $1
 usteer_roams() {  # total roam_events.$1 (source = steered away, target = arrived) across local nodes
 	ubus call usteer local_info 2>/dev/null | jsonfilter -e "@[*].roam_events.$1" 2>/dev/null | awk '{ s += $1 } END { if (NR) print s }'
 }
-tx_pct() {  # percent of tx packets that were retries ($2=retries) or failed ($2=failed), band $1
-	for i in $(aps "$1"); do iw dev "$i" station dump 2>/dev/null; done | awk -v k="$2" '
-		/tx packets:/ { p += $3 } /tx retries:/ { r += $3 } /tx failed:/ { f += $3 }
-		END { if (p > 0) printf "%.1f", ((k == "retries") ? r : f) * 100 / p }'
+tx_pct() {  # percent of tx packets that were retries ($2=retries) or finally dropped ($2=failed), band $1
+	# mt76 (mt7915/mt7981/mt7996) counts tx_failed = tx_retries + final drops (mt7915/mac.c, tx-free
+	# path), so on those drivers the drops are failed - retries. Other drivers count drops only.
+	for i in $(aps "$1"); do
+		d=$(readlink "/sys/class/net/$i/device/driver" 2>/dev/null)
+		case "${d##*/}" in mt79*|mt76*) mt=1 ;; *) mt=0 ;; esac
+		iw dev "$i" station dump 2>/dev/null | awk -v mt=$mt '
+			/tx packets:/ { p += $3 } /tx retries:/ { r += $3 } /tx failed:/ { f += $3 }
+			END { if (mt) f -= r; if (f < 0) f = 0; print p + 0, r + 0, f + 0 }'
+	done | awk -v k="$2" '{ p += $1; r += $2; f += $3 } END { if (p > 0) printf "%.1f", ((k == "retries") ? r : f) * 100 / p }'
 }
 usteer_peers() {  # distinct remote usteer hosts this AP sees (one host has a node per radio, "<ip>#<node>")
 	ubus call usteer remote_info 2>/dev/null | sed -n 's/^[[:space:]]*"\([^"]*#[^"]*\)": {$/\1/p' | cut -d'#' -f1 | sort -u | wc -l
@@ -84,32 +96,40 @@ firmware_json() {  # Netgear image updates (ghupdate) for a read-only MQTT updat
 	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","release_summary":"ghupdate state: %s"}\n' \
 		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$(esc "${ST:-unknown}")"
 }
-signals() { for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
-	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k; break } }'; }
+signals() {  # "dBm MAC" for every station on this AP's access points (same as ha-wifi's stations)
+	for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
+	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k, $1; break } }'; }
 uplink() { for p in lan eth0; do [ -r "/sys/class/net/$p/speed" ] && { echo "$p"; return; }; done; }
 
 # ---------- one state message ----------
 state() {
 	up=$(uplink)
-	weak=$(signals | awk '$1 < -70' | wc -l); weakest=$(signals | sort -n | head -n 1)
+	# One iwinfo pass feeds all three, so count, weakest and list agree. NF skips the empty line
+	# that echo "" prints with no stations (awk would compare "" < -70 as strings: true).
+	sig=$(signals)
+	weak=$(echo "$sig" | awk 'NF && $1 < -70' | wc -l)
+	weakest=$(echo "$sig" | awk 'NF' | sort -n | head -n 1 | cut -d' ' -f1)
+	# "MAC=dBm,..." below -70 dBm, weakest first, at most 8 (ha-wifi weaknames' format; 8 x 21 chars
+	# fits HA's 255-char state limit). HA's template helpers turn the MACs into device names.
+	weakmacs=$(echo "$sig" | awk 'NF && $1 < -70' | sort -n | head -n 8 | awk '{ printf "%s%s=%s", (NR > 1 ? "," : ""), $2, $1 }')
 	mode=; [ -r /etc/beryl-mode/current ] && mode=$(cat /etc/beryl-mode/current)
 	sw=$(sed -n 's/.*|mode *) in *\([a-z]*\).*/\1/p' /sys/kernel/debug/gpio 2>/dev/null | head -n 1)
 	. /etc/openwrt_release
 	printf '{'
-	printf '"temp_cpu":%s,' "$(num "$(hwmon_temp cpu_thermal)")"
-	printf '"temp_wifi_2g":%s,"temp_wifi_5g":%s,' "$(num "$(wifi_temp 2g)")" "$(num "$(wifi_temp 5g)")"
-	printf '"temp_eth_phy":%s,' "$(num "$(hwmon_temp 'mdio_bus*')")"
+	printf '"temp_cpu":%s,' "$(temp "$(hwmon_temp cpu_thermal)")"
+	printf '"temp_wifi_2g":%s,"temp_wifi_5g":%s,' "$(temp "$(wifi_temp 2g)")" "$(temp "$(wifi_temp 5g)")"
+	printf '"temp_eth_phy":%s,' "$(temp "$(hwmon_temp 'mdio_bus*')")"
 	printf '"fan_rpm":%s,' "$(num "$(fan_rpm)")"
 	for b in 2g 5g; do
 		printf '"load_%s":%s,"noise_%s":%s,"clients_%s":%s,' \
-			$b "$(num "$(usteer_band $b load)")" $b "$(num "$(usteer_band $b noise)")" $b "$(num "$(usteer_band $b n_assoc)")"
+			$b "$(pct "$(usteer_band $b load)")" $b "$(num "$(usteer_band $b noise)")" $b "$(num "$(usteer_band $b n_assoc)")"
 		printf '"tx_retry_pct_%s":%s,"tx_fail_pct_%s":%s,' $b "$(num "$(tx_pct $b retries)")" $b "$(num "$(tx_pct $b failed)")"
 	done
 	printf '"roams_in":%s,"roams_out":%s,' "$(num "$(usteer_roams target)")" "$(num "$(usteer_roams source)")"
-	printf '"weak_clients":%s,"weakest_dbm":%s,' "$(num "$weak")" "$(num "$weakest")"
+	printf '"weak_client_count":%s,"weakest_dbm":%s,"weak_macs":%s,' "$(num "$weak")" "$(num "$weakest")" "$(str "$weakmacs")"
 	printf '"uplink_mbps":%s,"uplink_flaps":%s,' "$(num "$(cat "/sys/class/net/$up/speed" 2>/dev/null)")" "$(num "$(cat "/sys/class/net/$up/carrier_changes" 2>/dev/null)")"
 	printf '"roam_peers":%s,"lldp_neighbors":%s,' "$(num "$(usteer_peers)")" "$(str "$(lldp_neighbors)")"
-	printf '"mode":%s,"switch":%s,"firmware":%s' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
+	printf '"mode":%s,"switch":%s,"openwrt_version":%s' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
 	printf '}\n'
 }
 
@@ -128,19 +148,23 @@ clients_2g|2.4 GHz clients|||measurement|mdi:account-multiple
 clients_5g|5 GHz clients|||measurement|mdi:account-multiple
 tx_retry_pct_2g|2.4 GHz tx retries (experimental)|%||measurement|mdi:repeat
 tx_retry_pct_5g|5 GHz tx retries (experimental)|%||measurement|mdi:repeat
-tx_fail_pct_2g|2.4 GHz tx failures (experimental)|%||measurement|mdi:alert-circle-outline
-tx_fail_pct_5g|5 GHz tx failures (experimental)|%||measurement|mdi:alert-circle-outline
+tx_fail_pct_2g|2.4 GHz tx drops (experimental)|%||measurement|mdi:alert-circle-outline
+tx_fail_pct_5g|5 GHz tx drops (experimental)|%||measurement|mdi:alert-circle-outline
 roams_in|Roams in|||total_increasing|mdi:transfer-down
 roams_out|Roams out|||total_increasing|mdi:transfer-up
-weak_clients|Weak clients|||measurement|mdi:wifi-strength-1-alert
+weak_client_count|Weak clients|||measurement|mdi:wifi-strength-1-alert
 weakest_dbm|Weakest client signal|dBm|signal_strength|measurement|
+weak_macs|Weak devices (MAC=dBm)||||mdi:wifi-strength-1-alert
 uplink_mbps|Uplink speed|Mbit/s|data_rate|measurement|
 uplink_flaps|Uplink link changes|||total_increasing|mdi:ethernet-cable-off
 roam_peers|Roaming peers|||measurement|mdi:access-point-network
 lldp_neighbors|LLDP/CDP neighbours||||mdi:switch
 mode|Mode||||mdi:airplane-cog
 switch|Side switch position||||mdi:toggle-switch-outline
-firmware|Firmware||||mdi:package-variant'
+openwrt_version|OpenWrt version||||mdi:package-variant'
+# Keys renamed since the first release (they collided with older SNMP/template entity ids in HA).
+# Their retained discovery configs are cleared at startup, which removes the stale entities in HA.
+RETIRED='sensor/weak_clients sensor/firmware'
 
 discovery() {  # prints "topic<TAB>payload" lines
 	model=$(cat /tmp/sysinfo/model 2>/dev/null)
@@ -166,6 +190,9 @@ discovery() {  # prints "topic<TAB>payload" lines
 pub() {  # pub TOPIC PAYLOAD [retain]
 	XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -t "$1" -m "$2" ${3:+-r} -q 1
 }
+clear_retained() {  # an empty retained message deletes the retained one (and the HA entity, for discovery)
+	XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -t "$1" -n -r -q 1
+}
 write_opts() {  # broker options live in a 0600 file, never on the command line (ps would show them)
 	mkdir -p /tmp/ha-mqtt; chmod 700 /tmp/ha-mqtt
 	umask 077
@@ -181,6 +208,7 @@ write_opts() {  # broker options live in a 0600 file, never on the command line 
 case "${1:-run}" in
 	dry-run)
 		discovery | sed 's/\t/  /'
+		for k in $RETIRED; do echo "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config  (cleared)"; done
 		echo "$STATE_TOPIC  $(state)"
 		fw=$(firmware_json); [ -n "$fw" ] && echo "$TPREFIX/$NODE/firmware  $fw"
 		;;
@@ -189,6 +217,7 @@ case "${1:-run}" in
 		[ -n "$(cfg host)" ] || { logger -t ha-mqtt "no broker host set"; exit 1; }
 		command -v mosquitto_pub >/dev/null || { logger -t ha-mqtt "mosquitto_pub not installed"; exit 1; }
 		write_opts
+		for k in $RETIRED; do clear_retained "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config"; done
 		n=0
 		while :; do
 			if [ $((n % 60)) -eq 0 ]; then  # (re)announce discovery at start and every 60 cycles

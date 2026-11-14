@@ -1,0 +1,1 @@
+# Netgear WAX214v2 extras on top of packages/common.txt (none at the moment).

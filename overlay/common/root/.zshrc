@@ -1,5 +1,5 @@
 # Root shell for this access point: zsh + Oh My Zsh (core) + Oh My Posh.
-# Baked into the image by github.com/oliviacpu/openwrt-wax214v2 (overlay/root/.zshrc); edit it there.
+# Baked into the image by github.com/oliviacpu/openwrt-home-aps (overlay/common/root/.zshrc); edit it there.
 # A per-site prompt config (~/.config/oh-my-posh/hosts.omp.json) and iTerm2 integration can be pushed
 # separately; without them Oh My Posh uses its default theme.
 export ZSH=/usr/share/oh-my-zsh
@@ -14,7 +14,9 @@ plugins=()
 # It only uses XDG_CACHE_HOME if the directory already exists.
 export XDG_CACHE_HOME=/tmp/.cache
 [[ -d $XDG_CACHE_HOME ]] || mkdir -p $XDG_CACHE_HOME
-export POSH_HOST=netgear
+# This AP's id (netgear, beryl, ...) is baked in at build time; hostnames differ from the ids.
+AP_ID=$(cat /etc/ap-id 2>/dev/null); AP_ID=${AP_ID:-ap}
+export POSH_HOST=$AP_ID
 if [[ -x /usr/bin/oh-my-posh ]]; then
   if [[ -r ~/.config/oh-my-posh/hosts.omp.json ]]; then
     eval "$(oh-my-posh init zsh --config ~/.config/oh-my-posh/hosts.omp.json)"
@@ -22,7 +24,7 @@ if [[ -x /usr/bin/oh-my-posh ]]; then
     eval "$(oh-my-posh init zsh)"
   fi
 fi
-iterm2_hostname=netgear
+iterm2_hostname=$AP_ID
 if [[ -e ~/.iterm2_shell_integration.zsh ]]; then source ~/.iterm2_shell_integration.zsh; fi
 
 # Status card on interactive login (firmware, health, uplink, radios, roaming peers).

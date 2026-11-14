@@ -1,0 +1,16 @@
+#!/bin/sh
+# ghupdate inhibit hook: exit 0 (and print why) to block automatic and HA-triggered installs.
+# Blocks while the roaming peer AP (seen via usteer) has recently dropped off, which usually means it
+# is mid-upgrade or down, so the two APs never reboot at the same time. A peer gone for 6 hours or
+# more (e.g. a travel router that's away) stops blocking.
+SEEN=/tmp/ghupdate/peer-seen
+n=$(ubus call usteer remote_hosts 2>/dev/null | jsonfilter -e '@.*' 2>/dev/null | wc -l)
+if [ "${n:-0}" -gt 0 ]; then
+	mkdir -p /tmp/ghupdate && date +%s > "$SEEN"
+	exit 1
+fi
+[ -r "$SEEN" ] || exit 1
+age=$(( $(date +%s) - $(cat "$SEEN") ))
+[ "$age" -lt 21600 ] || exit 1
+echo "the other access point dropped off $((age / 60)) min ago"
+exit 0
