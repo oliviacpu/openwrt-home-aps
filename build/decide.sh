@@ -26,7 +26,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SHAPE=$(cd "$ROOT" && git rev-parse HEAD:overlay HEAD:build HEAD:.github/workflows/build.yml | sha256sum | cut -c1-12)
 KEY="$V-$SHAPE"
 
-releases=$(gh api "repos/$REPO/releases?per_page=100" 2>/dev/null || echo '[]')
+releases=$(gh api "repos/$REPO/releases?per_page=100" 2>/dev/null) || releases='[]'
+jq -e 'type == "array"' >/dev/null 2>&1 <<<"$releases" || releases='[]'
 SERIAL=$(jq -r '[.[].tag_name | capture("-b(?<n>[0-9]+)$").n | tonumber] | (max // 0) + 1' <<<"$releases")
 EXISTING=$(jq -r --arg k "$KEY" '[.[] | select((.body // "") | contains("build-key: " + $k)) | .tag_name][0] // ""' <<<"$releases")
 
