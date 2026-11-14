@@ -26,6 +26,7 @@ check "updater first-boot script"           "test -f '$R/etc/uci-defaults/98-ghu
 check "updater is executable"               "test -x '$R/usr/sbin/ghupdate'"
 check "updater boot hook is executable"     "test -x '$R/etc/init.d/ghupdate'"
 check "status CGI is executable"            "test -x '$R/www/cgi-bin/ghupdate-status'"
+check "dumb-AP NTP/DNS fix is executable"  "test -x '$R/etc/hotplug.d/iface/95-resolv-for-jails'"
 check "build identity is $TAG"              "grep -qx \"GHU_TAG='$TAG'\" '$R/etc/ghupdate/build'"
 check "release public key present"          "grep -q '^RW' '$R/etc/ghupdate/release.pub'"
 check "updater settings present"            "grep -q \"option repo\" '$R/etc/config/ghupdate'"

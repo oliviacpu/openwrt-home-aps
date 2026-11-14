@@ -1,0 +1,16 @@
+#!/bin/sh
+# Dumb-AP fix. With dnsmasq off, /tmp/resolv.conf is a symlink to
+# /tmp/resolv.conf.d/resolv.conf.auto. Sandboxed services can't follow it: sysntpd runs in a ujail
+# that has no /tmp, so ntpd never resolves its servers and the clock is never set. Keep
+# /tmp/resolv.conf a real copy of the DHCP-provided DNS config and restart sysntpd when it changes.
+[ "$INTERFACE" = lan ] || exit 0
+case "$ACTION" in ifup|ifupdate) ;; *) exit 0 ;; esac
+/etc/init.d/dnsmasq running >/dev/null 2>&1 && exit 0
+
+src=/tmp/resolv.conf.d/resolv.conf.auto
+[ -s "$src" ] || exit 0
+[ ! -L /tmp/resolv.conf ] && [ "$(cat "$src")" = "$(cat /tmp/resolv.conf 2>/dev/null)" ] && exit 0
+
+cp "$src" /tmp/resolv.conf.new && mv -f /tmp/resolv.conf.new /tmp/resolv.conf
+logger -t resolv-for-jails "/tmp/resolv.conf is now a regular file; restarting sysntpd"
+/etc/init.d/sysntpd restart
