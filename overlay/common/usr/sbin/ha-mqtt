@@ -5,7 +5,7 @@
 #
 #   ha-mqtt run        loop forever (procd: /etc/init.d/ha-mqtt)
 #   ha-mqtt dry-run    print the discovery configs and one state message, publish nothing
-#   ha-mqtt listen     HA firmware installs (procd, second instance): see "firmware installs" below
+#   ha-mqtt listen     commands from HA (procd, second instance): firmware installs, LED lights
 #
 # Every sensor reads one key from a single JSON state topic, and has expire_after = 3 intervals.
 # Missing or implausible data (no 5 GHz AP, no fan, a sensor that isn't ready) is published as null
@@ -100,8 +100,10 @@ firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
 	case "$ST" in ''|unknown) sum="Checking for updates" ;; esac   # just booted: ghupdate hasn't checked yet
 	sum=$(printf '%s' "$sum" | cut -c1-250)   # HA's release_summary limit is 255
-	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","in_progress":%s,"release_url":%s,"release_summary":"%s"}\n' \
-		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$prog" "$(str "$LU")" "$(esc "$sum")"
+	# HA rejects the whole payload if release_url is null ("invalid url"), so leave it out when unknown.
+	url=; [ -n "$LU" ] && url=$(printf ',"release_url":"%s"' "$(esc "$LU")")
+	printf '{"installed_version":"%s","latest_version":"%s","title":"%s image","in_progress":%s%s,"release_summary":"%s"}\n' \
+		"$(esc "$inst")" "$(esc "$latest")" "$(esc "$NAME")" "$prog" "$url" "$(esc "$sum")"
 }
 # HA-triggered installs need a ghupdate with `remote-install` (rate limit, newer-only, inhibit hooks,
 # signature + checksum + sysupgrade -T). Detected by reading the script, never by running it:
@@ -127,6 +129,110 @@ tailnet() {  # sets TS_* from `tailscale status --json`; all empty when tailscal
 	TS_EXIT=$(jsonfilter -s "$ts" -e '@.ExitNodeStatus.Online' 2>/dev/null)
 }
 bool() { case "$1" in '') echo null ;; true|1) echo true ;; *) echo false ;; esac; }   # JSON boolean or null
+
+# ---------- LEDs (HA lights) ----------
+# The allow-list is every LED in /sys/class/leds with a plain name, read at startup; commands can
+# only name one of those. Changes made from HA last until the next reboot, which brings back the
+# boot-time behaviour (the "Default" effect restores it without a reboot).
+LEDD=/sys/class/leds
+led_list() {  # "slug name" per LED
+	for d in "$LEDD"/*; do
+		[ -e "$d/brightness" ] || continue
+		n=${d##*/}
+		case "$n" in '' | *[!A-Za-z0-9:_.+-]* | *..*) continue ;; esac
+		echo "$(echo "$n" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '_' | sed 's/__*/_/g; s/^_//; s/_$//') $n"
+	done
+}
+led_name() {  # "Power light (blue)", "2.4 GHz light", "5 GHz activity light", ...
+	n=$1; col=; fn=$n
+	case "$n" in *:*) col=${n%%:*}; fn=${n#*:} ;; esac
+	case "$fn" in
+		wlan-2ghz | wlan2g) echo "2.4 GHz light" ;;
+		wlan-5ghz | wlan5g) echo "5 GHz light" ;;
+		*phy[0-9]*) p=${fn##*phy}; p=phy${p%%[!0-9]*}
+			[ "$(phy_band "$p")" = 2g ] && echo "2.4 GHz activity light" || echo "5 GHz activity light" ;;
+		*) f=$(echo "$fn" | sed 's/[-_]/ /g'); f="$(printf '%s' "$f" | cut -c1 | tr 'a-z' 'A-Z')$(printf '%s' "$f" | cut -c2-)"
+			[ -n "$col" ] && echo "$f light ($col)" || echo "$f light" ;;
+	esac
+}
+led_trig() { sed -n 's/.*\[\([^]]*\)\].*/\1/p' "$LEDD/$1/trigger" 2>/dev/null; }
+led_effects() {  # "Default" (as booted) + the triggers that work without extra parameters
+	echo Default
+	tr ' ' '\n' < "$LEDD/$1/trigger" | tr -d '[]' | grep -vxE 'none|netdev|pattern|usbport|oneshot|transient|kbd-.*' | grep . | head -n 30
+}
+led_snapshot() {  # each LED's boot-time behaviour, recorded once per boot, for "Default"
+	mkdir -p /tmp/ha-mqtt/led-default
+	led_list | while read -r slug n; do
+		f=/tmp/ha-mqtt/led-default/$slug; [ -e "$f" ] && continue
+		# Per-process temp name (run and listen both get here at start); the group must end true,
+		# or a failing last `[ -r ]` would skip the mv and the snapshot would be retaken every start.
+		{ echo "trigger=$(led_trig "$n")"; echo "brightness=$(cat "$LEDD/$n/brightness")"
+		  for a in device_name link rx tx interval delay_on delay_off; do
+			[ -r "$LEDD/$n/$a" ] && echo "$a=$(cat "$LEDD/$n/$a")"
+		  done; true; } > "$f.$$" && mv "$f.$$" "$f"
+	done
+}
+led_restore() {  # $1 name, $2 slug: back to the recorded boot-time behaviour
+	f=/tmp/ha-mqtt/led-default/$2; d=$LEDD/$1; [ -r "$f" ] || return 1
+	t=$(sed -n 's/^trigger=//p' "$f")
+	echo none > "$d/trigger"
+	if [ "$t" = none ]; then
+		sed -n 's/^brightness=//p' "$f" > "$d/brightness"
+	else
+		cat "$d/max_brightness" > "$d/brightness"   # a trigger blinks at the brightness it starts with
+		echo "$t" > "$d/trigger"
+		for a in device_name interval delay_on delay_off link rx tx; do
+			v=$(sed -n "s/^$a=//p" "$f"); [ -n "$v" ] && [ -w "$d/$a" ] && echo "$v" > "$d/$a" 2>/dev/null
+		done
+	fi
+}
+led_state() {  # $1 name, $2 slug: state JSON for HA's json-schema light
+	d=$LEDD/$1; t=$(led_trig "$1"); b=$(cat "$d/brightness" 2>/dev/null); m=$(cat "$d/max_brightness" 2>/dev/null)
+	dt=$(sed -n 's/^trigger=//p' "/tmp/ha-mqtt/led-default/$2" 2>/dev/null)
+	mode=onoff; [ "${m:-1}" -gt 1 ] && mode=brightness
+	eff=
+	if [ -n "$t" ] && [ "$t" != none ]; then st=ON; bb=$m; [ "$t" = "$dt" ] && eff=Default || eff=$t
+	else bb=${b:-0}; [ "$bb" -gt 0 ] && st=ON || st=OFF; fi
+	printf '{"state":"%s","color_mode":"%s"' "$st" "$mode"
+	[ "$mode" = brightness ] && printf ',"brightness":%s' "${bb:-0}"
+	[ -n "$eff" ] && printf ',"effect":"%s"' "$(esc "$eff")"
+	printf '}\n'
+}
+led_publish() {  # publish each LED's state when it changed (or always, with $1 = 1)
+	mkdir -p /tmp/ha-mqtt/led-state
+	led_list | while read -r slug n; do
+		j=$(led_state "$n" "$slug"); c=/tmp/ha-mqtt/led-state/$slug
+		[ "$1" = 1 ] || [ "$j" != "$(cat "$c" 2>/dev/null)" ] || continue
+		pub "$TPREFIX/$NODE/led/$slug/state" "$j" retain && echo "$j" > "$c"
+	done
+}
+led_command() {  # $1 slug (from the topic), $2 JSON from HA: {"state":"ON|OFF","brightness":N,"effect":"..."}
+	n=$(echo "$LEDS" | awk -v s="$1" '$1 == s { print $2; exit }')
+	[ -n "$n" ] || { logger -t ha-mqtt "ignored an LED command for an unknown LED"; return; }
+	d=$LEDD/$n
+	s=$(jsonfilter -s "$2" -e '@.state' 2>/dev/null); b=$(jsonfilter -s "$2" -e '@.brightness' 2>/dev/null)
+	e=$(jsonfilter -s "$2" -e '@.effect' 2>/dev/null)
+	m=$(cat "$d/max_brightness" 2>/dev/null); m=${m:-1}
+	case "$s" in
+		OFF) echo none > "$d/trigger"; echo 0 > "$d/brightness" ;;
+		ON)
+			if [ -n "$e" ]; then
+				if [ "$e" = Default ]; then led_restore "$n" "$1"
+				elif led_effects "$n" | grep -qxF -- "$e"; then echo none > "$d/trigger"; echo "$m" > "$d/brightness"; echo "$e" > "$d/trigger"
+				else logger -t ha-mqtt "ignored an unknown effect for LED $n"; return; fi
+			elif [ -n "$b" ]; then
+				case "$b" in *[!0-9]* | '') logger -t ha-mqtt "ignored a bad brightness for LED $n"; return ;; esac
+				[ "$b" -gt "$m" ] && b=$m
+				echo none > "$d/trigger"; echo "$b" > "$d/brightness"
+			elif [ "$(led_trig "$n")" = none ] && [ "$(cat "$d/brightness")" -eq 0 ]; then
+				echo "$m" > "$d/brightness"
+			fi ;;
+		*) logger -t ha-mqtt "ignored an LED command without a valid state"; return ;;
+	esac
+	logger -t ha-mqtt "LED $n: $s${e:+, effect $e}${b:+, brightness $b} (from Home Assistant)"
+	mkdir -p /tmp/ha-mqtt/led-state
+	j=$(led_state "$n" "$1"); pub "$TPREFIX/$NODE/led/$1/state" "$j" retain && echo "$j" > "/tmp/ha-mqtt/led-state/$1"
+}
 
 # ---------- one state message ----------
 state() {
@@ -246,6 +352,14 @@ $TS_SENSORS"
 				"$DPREFIX" "$NODE" "$key" "$name" "$NODE" "$key" "$NODE" "$key" "$STATE_TOPIC" "$key" "$key" $((INTERVAL * 3)) "$extra" "$dev"
 		done
 	fi
+	led_list | while read -r slug n; do
+		m=$(cat "$LEDD/$n/max_brightness" 2>/dev/null); m=${m:-1}
+		modes='["onoff"]'; bs=; [ "$m" -gt 1 ] && { modes='["brightness"]'; bs=",\"brightness_scale\":$m"; }
+		effs=$(led_effects "$n" | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
+		printf '%s/light/%s/led_%s/config\t{"name":"%s","unique_id":"%s_led_%s","default_entity_id":"light.%s_led_%s","schema":"json","command_topic":"%s/%s/led/%s/set","state_topic":"%s/%s/led/%s/state","supported_color_modes":%s%s,"effect":true,"effect_list":[%s],"icon":"mdi:led-on","device":%s}\n' \
+			"$DPREFIX" "$NODE" "$slug" "$(esc "$(led_name "$n")")" "$NODE" "$slug" "$NODE" "$slug" \
+			"$TPREFIX" "$NODE" "$slug" "$TPREFIX" "$NODE" "$slug" "$modes" "$bs" "$effs" "$dev"
+	done
 	if command -v ghupdate >/dev/null 2>&1; then
 		# Install button only with remote-install (see remote_ok); otherwise read-only.
 		cmd=; remote_ok && cmd=$(printf ',"command_topic":"%s/%s/firmware/install","payload_install":"install"' "$TPREFIX" "$NODE")
@@ -255,8 +369,8 @@ $TS_SENSORS"
 }
 
 # ---------- publishing ----------
-pub() {  # pub TOPIC PAYLOAD [retain]
-	XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -t "$1" -m "$2" ${3:+-r} -q 1
+pub() {  # pub TOPIC PAYLOAD [retain]; $PUB_ID overrides the client id (the listener sets its own)
+	XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub ${PUB_ID:+-i "$PUB_ID"} -t "$1" -m "$2" ${3:+-r} -q 1
 }
 clear_retained() {  # an empty retained message deletes the retained one (and the HA entity, for discovery)
 	XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -t "$1" -n -r -q 1
@@ -298,6 +412,7 @@ case "${1:-run}" in
 		# at start, whenever the LAN address changes, and every 30 cycles. Each cycle publishes the
 		# state first, and touches discovery only if that worked, so an unreachable broker (e.g. Away
 		# without the tailnet) costs one failed connection per cycle, not dozens.
+		led_snapshot
 		n=0; announced=; need_announce=1; need_clear=1; up=1
 		while :; do
 			LANIP=$(lan_ip)
@@ -316,6 +431,7 @@ case "${1:-run}" in
 					else logger -t ha-mqtt "$fails discovery messages failed; retrying next cycle"; fi
 				fi
 				fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
+				led_publish "$([ "$need_announce" = 0 ] && [ $((n % 30)) -eq 0 ] && echo 1 || echo 0)"
 			else
 				[ "$up" = 0 ] || logger -t ha-mqtt "publish to the broker failed; retrying every cycle"
 				up=0
@@ -324,39 +440,67 @@ case "${1:-run}" in
 		done
 		;;
 	listen)
-		# ---------- firmware installs from Home Assistant ----------
-		# HA's update entity publishes "install" (not retained) to <prefix>/<node>/firmware/install.
-		# -R skips any stale retained message at connect, and the payload must match exactly. Then
-		# `ghupdate remote-install` (no arguments) decides and returns at once: exit 0 = accepted, and
-		# it runs detached: a newer signed build for this device only, the inhibit hooks (Beryl: Home
-		# only; the other AP must not be down), signature, checksum, sysupgrade -T. Exit 75 = refused
-		# (busy, or another request in the last 15 min). This side adds the same 15-min limit, so a
-		# burst of presses doesn't even reach ghupdate. Every request is logged (logread -e ha-mqtt).
+		# ---------- commands from Home Assistant ----------
+		# Firmware installs: HA's update entity publishes "install" (not retained) to
+		# <prefix>/<node>/firmware/install. The payload must match exactly; `ghupdate remote-install`
+		# (no arguments) then decides and returns at once: exit 0 = accepted, and it runs detached
+		# (a newer signed build for this device only, the inhibit hooks: Beryl Home only, the other AP
+		# not down; signature, checksum, sysupgrade -T). Exit 75 = refused (busy or rate-limited).
+		# This side adds the same 15-min limit, so a burst of presses doesn't even reach ghupdate.
+		# LEDs: HA's lights publish JSON to <prefix>/<node>/led/<slug>/set. Only allow-listed LEDs,
+		# only their trigger and brightness files; values are validated (see led_command).
+		# -R skips stale retained messages at connect. Every request is logged (logread -e ha-mqtt).
 		[ "$(cfg enabled)" = 1 ] || exit 0
-		remote_ok || { logger -t ha-mqtt "ghupdate has no remote-install: HA firmware installs stay off"; exit 0; }
+		ro=0; remote_ok && ro=1
+		LEDS=$(led_list)
+		[ "$ro" = 1 ] || [ -n "$LEDS" ] || { logger -t ha-mqtt "nothing to control (no remote-install, no LEDs)"; exit 0; }
 		[ -n "$(cfg host)" ] || { logger -t ha-mqtt "no broker host set"; exit 1; }
 		command -v mosquitto_sub >/dev/null || { logger -t ha-mqtt "mosquitto_sub not installed"; exit 1; }
 		write_opts
 		i=0; while [ -z "$(lan_ip)" ] && [ $i -lt 120 ]; do sleep 2; i=$((i + 2)); done
-		CMD="$TPREFIX/$NODE/firmware/install"; LAST=/tmp/ha-mqtt/last-install-request
-		logger -t ha-mqtt "listening for Home Assistant firmware installs on $CMD"
-		XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_sub -R -q 1 -t "$CMD" | while IFS= read -r msg; do
-			[ "$msg" = install ] || { logger -t ha-mqtt "ignored a firmware command with an unexpected payload"; continue; }
-			now=$(date +%s); last=$(cat "$LAST" 2>/dev/null || echo 0)
-			if [ $((now - last)) -lt 900 ]; then
-				logger -t ha-mqtt "Home Assistant install request ignored: at most one per 15 min"; continue
-			fi
-			ghupdate remote-install >/dev/null 2>&1; rc=$?
-			case $rc in
-				0) echo "$now" > "$LAST"; logger -t ha-mqtt "Home Assistant install request accepted by ghupdate (progress: logread -e ghupdate)" ;;
-				75) logger -t ha-mqtt "Home Assistant install request refused by ghupdate: busy or rate-limited (logread -e ghupdate)" ;;
-				*) logger -t ha-mqtt "Home Assistant install request: ghupdate remote-install failed (exit $rc)" ;;
+		led_snapshot
+		PUB_ID=ha-mqtt-$NODE-cmd   # own client id: sharing the publisher's would drop one connection
+		CMD="$TPREFIX/$NODE/firmware/install"; LEDP="$TPREFIX/$NODE/led/"; LAST=/tmp/ha-mqtt/last-install-request
+		set --
+		[ "$ro" = 1 ] && set -- -t "$CMD"
+		[ -n "$LEDS" ] && set -- "$@" -t "${LEDP}+/set"
+		logger -t ha-mqtt "listening for Home Assistant commands:$([ "$ro" = 1 ] && echo ' firmware installs')$([ -n "$LEDS" ] && echo " $(echo "$LEDS" | wc -l) LEDs")"
+		# procd stops an instance by killing its main process only. A `mosquitto_sub | while` pipeline
+		# would outlive that, and an orphaned subscriber with the same client id keeps knocking the new
+		# one off the broker, so commands get lost. Hence: clear any leftovers for this node first,
+		# read through a FIFO in this shell, and stop our subscriber on TERM.
+		for p in $(ps w | grep '[m]osquitto_sub' | grep -F "$TPREFIX/$NODE/" | awk '{ print $1 }'); do kill "$p" 2>/dev/null; done
+		F=/tmp/ha-mqtt/commands.fifo; rm -f "$F"; mkfifo -m 600 "$F" || exit 1
+		XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_sub -v -R -q 1 "$@" > "$F" &
+		SUB=$!
+		trap 'kill "$SUB" 2>/dev/null; rm -f "$F"; exit 0' TERM INT HUP
+		while IFS= read -r line; do
+			topic=${line%% *}; msg=; [ "$topic" = "$line" ] || msg=${line#* }
+			case "$topic" in
+			"$CMD")
+				[ "$ro" = 1 ] || continue
+				[ "$msg" = install ] || { logger -t ha-mqtt "ignored a firmware command with an unexpected payload"; continue; }
+				now=$(date +%s); last=$(cat "$LAST" 2>/dev/null || echo 0)
+				if [ $((now - last)) -lt 900 ]; then
+					logger -t ha-mqtt "Home Assistant install request ignored: at most one per 15 min"; continue
+				fi
+				ghupdate remote-install >/dev/null 2>&1; rc=$?
+				case $rc in
+					0) echo "$now" > "$LAST"; logger -t ha-mqtt "Home Assistant install request accepted by ghupdate (progress: logread -e ghupdate)" ;;
+					75) logger -t ha-mqtt "Home Assistant install request refused by ghupdate: busy or rate-limited (logread -e ghupdate)" ;;
+					*) logger -t ha-mqtt "Home Assistant install request: ghupdate remote-install failed (exit $rc)" ;;
+				esac
+				sleep 3; fw=$(firmware_json); [ -n "$fw" ] && pub "$TPREFIX/$NODE/firmware" "$fw" retain
+				;;
+			"$LEDP"*/set)
+				slug=${topic#"$LEDP"}; slug=${slug%/set}
+				case "$slug" in '' | */* | *[!a-z0-9_]*) logger -t ha-mqtt "ignored an LED command on a bad topic"; continue ;; esac
+				led_command "$slug" "$msg"
+				;;
 			esac
-			# Own client id: sharing the publisher's would make the broker drop one of the two connections.
-			sleep 3; fw=$(firmware_json)
-			[ -n "$fw" ] && XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_pub -i "ha-mqtt-$NODE-cmd" -t "$TPREFIX/$NODE/firmware" -m "$fw" -r -q 1
-		done
-		logger -t ha-mqtt "firmware command subscription ended; procd restarts it"
+		done < "$F"
+		kill "$SUB" 2>/dev/null; rm -f "$F"
+		logger -t ha-mqtt "command subscription ended; procd restarts it"
 		exit 1
 		;;
 	*) echo "usage: ha-mqtt run | dry-run | listen" >&2; exit 2 ;;
