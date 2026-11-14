@@ -31,7 +31,7 @@ check "build identity is $TAG"              "grep -qx \"GHU_TAG='$TAG'\" '$R/etc
 check "release public key present"          "grep -q '^RW' '$R/etc/ghupdate/release.pub'"
 check "updater settings present"            "grep -q \"option repo\" '$R/etc/config/ghupdate'"
 check "LuCI module + views present"         "test -f '$R/www/luci-static/resources/ghupdate.js' && test -f '$R/www/luci-static/resources/view/status/include/05_ghupdate.js' && test -f '$R/www/luci-static/resources/view/system/ghupdate.js'"
-check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' >/dev/null"
+check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/homeassistant.json' >/dev/null"
 for t in usign uclient-fetch jsonfilter sha256sum; do
 	check "device has $t"                   "find '$R/bin' '$R/sbin' '$R/usr/bin' '$R/usr/sbin' -maxdepth 1 -name '$t' | grep -q ."
 done
