@@ -2,8 +2,8 @@
 # devices; the publish step fails if they don't). Anything installed later with apk is gone after
 # the next update, so keepers belong here. Comments and blank lines are ignored.
 
-luci luci-ssl                            # web UI (http + https). Home Assistant's openwrt integration uses ubus with the
-                                         # homeassistant rpcd login; luci-mod-rpc stays out (its sys.exec runs anything as root)
+luci luci-ssl                            # web UI (http + https). Home Assistant uses MQTT only (ha-mqtt);
+                                         # luci-mod-rpc stays out (its sys.exec runs anything as root)
 zsh zoneinfo-america                     # root shell; full timezone data
 htop tmux nano curl iperf3 tcpdump-mini  # everyday CLI
 mtr-nojson ethtool drill lldpd           # diagnostics; LLDP/CDP to the switch

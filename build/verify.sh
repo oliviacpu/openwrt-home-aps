@@ -38,8 +38,9 @@ check "peer-down inhibit hook executable"   "test -x '$R/etc/ghupdate/inhibit.d/
 check "release public key present"          "grep -q '^RW' '$R/etc/ghupdate/release.pub'"
 check "LuCI module + views present"         "test -f '$R/www/luci-static/resources/ghupdate.js' && test -f '$R/www/luci-static/resources/view/status/include/05_ghupdate.js' && test -f '$R/www/luci-static/resources/view/system/ghupdate.js'"
 check "ghupdate takes HA installs (ha-mqtt looks for the remote-install label)" "grep -q '^[[:space:]]*remote-install)' '$R/usr/sbin/ghupdate'"
-check "HA ACL: no firmware, shell, package or shadow access" "jq -e '.homeassistant as \$h | ([\$h.read.file, \$h.write.file] | map(keys) | add | map(select(test(\"^/(bin/(sh|ash|opkg)|sbin/(apk|sysupgrade)|etc/shadow)\$\"))) | length == 0) and (\$h.read.ubus.system == [\"info\",\"board\"]) and (\$h.write.ubus.system == [\"reboot\"]) and (\$h.read.ubus | has(\"attendedsysupgrade\") | not) and (\$h.read.ubus.luci == [\"getMountPoints\"])' '$R/usr/share/rpcd/acl.d/homeassistant.json' >/dev/null"
-check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/homeassistant.json' >/dev/null"
+check "no homeassistant rpcd ACL (HA uses MQTT only)" "test ! -e '$R/usr/share/rpcd/acl.d/homeassistant.json'"
+check "homeassistant login retired at flash"   "test -x '$R/etc/uci-defaults/95-ha-ubus-retire'"
+check "LuCI menu/ACL JSON valid"            "jq -e . '$R/usr/share/luci/menu.d/luci-app-ghupdate.json' '$R/usr/share/rpcd/acl.d/luci-app-ghupdate.json' >/dev/null"
 for t in usign uclient-fetch jsonfilter sha256sum; do
 	check "device has $t"                   "find '$R/bin' '$R/sbin' '$R/usr/bin' '$R/usr/sbin' -maxdepth 1 -name '$t' | grep -q ."
 done

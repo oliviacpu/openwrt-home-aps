@@ -1,0 +1,15 @@
+#!/bin/sh
+# Home Assistant reads and controls the APs only over MQTT (ha-mqtt) since build 21; its openwrt
+# (ubus) integration is gone, and so is its least-privilege rpcd ACL (no longer in the image).
+# Remove the login that integration used: the rpcd login for user "homeassistant" (whatever its
+# section is called) and the matching shell-less system user. Runs after every flash; does nothing
+# once clean. Never touches root or any user with a real shell.
+for s in $(uci -q show rpcd | sed -n "s/^rpcd\.\([^.]*\)\.username='homeassistant'$/\1/p"); do
+	uci -q delete "rpcd.$s"
+done
+uci -q commit rpcd
+if grep -q '^homeassistant:[^:]*:[0-9]*:[0-9]*:[^:]*:[^:]*:/bin/false$' /etc/passwd; then
+	sed -i '/^homeassistant:/d' /etc/passwd /etc/shadow
+	sed -i '/^homeassistant:/d' /etc/group 2>/dev/null
+fi
+exit 0

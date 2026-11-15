@@ -1,10 +1,11 @@
 #!/bin/sh
-# SNMP is retired: Home Assistant reads the APs over MQTT (ha-mqtt) and the openwrt integration now.
+# SNMP is retired: Home Assistant reads the APs over MQTT (ha-mqtt).
 # Runs after every flash; does nothing once clean.
 # - The old SNMP helper scripts were carried through /etc/sysupgrade.conf, so this flash restored them
 #   from the backup. The image no longer has them: stop carrying them and delete the restored copies.
 # - Without snmpd, its config (incl. the read community) is a leftover: remove it.
-# - The rpcd ACL for the homeassistant login (openwrt integration) is in the image: stop carrying it.
+# - The homeassistant rpcd ACL was carried in sysupgrade.conf: stop carrying it (95-ha-ubus-retire
+#   removes the login itself; the image no longer ships the ACL).
 C=/etc/sysupgrade.conf
 for f in /usr/sbin/ha-wifi /usr/sbin/ha-weaknames /usr/sbin/cpu-busy; do
 	[ -e "/rom$f" ] && continue          # never touch a file the image itself ships
@@ -13,5 +14,5 @@ for f in /usr/sbin/ha-wifi /usr/sbin/ha-weaknames /usr/sbin/cpu-busy; do
 done
 [ -e /usr/sbin/snmpd ] || rm -f /etc/config/snmpd
 f=/usr/share/rpcd/acl.d/homeassistant.json
-[ -e "/rom$f" ] && sed -i "\#^$f\$#d" "$C"
+sed -i "\#^$f\$#d" "$C"; [ -e "/rom$f" ] || rm -f "$f"
 exit 0
