@@ -93,7 +93,7 @@ publishes `availability` (online/offline: the listener's MQTT will, and "online"
 `stations` (signal and rates per station), `system` (top processes and the last log lines, every 5
 cycles) and `event/new_device` (the first time a station MAC is seen; the list is in `/etc/ha-mqtt/`
 and kept across updates). With `option station_sensors '1'`, each station with a fixed MAC also gets
-Wi-Fi signal and speed sensors on the HA device that already has that MAC. Commands from HA are
+Wi-Fi signal and speed sensors on its own HA device, named by its MAC (rename it in HA; both APs' sensors share it). Commands from HA are
 validated and logged (`logread -e ha-mqtt`); the reboot and restart buttons take one press per 5 min.
 Not carried over from the integration: the Wi-Fi QR code images and the settings-backup button (both
 would put Wi-Fi or broker secrets on the broker).
