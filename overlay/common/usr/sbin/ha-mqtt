@@ -168,7 +168,7 @@ live() {  # live value from band $1's first AP interface: $2 = channel | txpower
 }
 txpower_max() {  # highest transmit power (dBm) band $1's radio offers; empty when its AP is down
 	i=$(aps "$1" | head -n 1); [ -n "$i" ] || return
-	iwinfo "$i" txpowerlist 2>/dev/null | awk '{ for (k = 1; k < NF; k++) if ($(k+1) == "dbm" && $k ~ /^[0-9]+$/) v = $k } END { if (v != "") print v }'
+	iwinfo "$i" txpowerlist 2>/dev/null | awk '{ for (k = 1; k < NF; k++) if (tolower($(k+1)) == "dbm" && $k ~ /^[0-9]+$/) v = $k } END { if (v != "") print v }'
 }
 ports() {  # "<ifname> <entity-id part> <name>" per Ethernet port, named like HA's openwrt integration did
 	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
@@ -714,8 +714,8 @@ case "${1:-run}" in
 		# without the tailnet) costs one failed connection per cycle, not dozens.
 		led_snapshot
 		# The listener wakes this loop (SIGUSR1) after a command, so HA sees the change at once.
+		SLP=; trap '[ -n "$SLP" ] && kill "$SLP" 2>/dev/null' USR1   # trap first: USR1 untrapped would end us
 		echo $$ > /tmp/ha-mqtt/run.pid
-		SLP=; trap '[ -n "$SLP" ] && kill "$SLP" 2>/dev/null' USR1
 		n=0; announced=; need_announce=1; need_clear=1; up=1
 		while :; do
 			LANIP=$(lan_ip)
