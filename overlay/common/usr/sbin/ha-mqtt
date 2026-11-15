@@ -101,12 +101,13 @@ lldp_neighbors() {  # every LLDP/CDP neighbour, "<name> <port> (<via>)" joined b
 }
 firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	command -v ghupdate >/dev/null 2>&1 || return
-	GHU_SERIAL= GHU_TAG=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
-	ST= UA= LS= LU= MSG= BLK=
+	GHU_SERIAL= GHU_TAG= GHU_OPENWRT=; [ -r /etc/ghupdate/build ] && . /etc/ghupdate/build
+	ST= UA= LS= LO= LU= MSG= BLK=
 	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial' \
-		-e 'LU=@.latest.url' -e 'MSG=@.message' -e 'BLK=@.auto.blocked')"
-	inst="build ${GHU_SERIAL:-?}"; latest=$inst
-	case "$UA" in true|1) [ -n "$LS" ] && latest="build $LS" ;; esac
+		-e 'LO=@.latest.openwrt' -e 'LU=@.latest.url' -e 'MSG=@.message' -e 'BLK=@.auto.blocked')"
+	# "<OpenWrt version> (build <n>)": the OpenWrt release the image is based on, then this repo's build.
+	inst="${GHU_OPENWRT:-$(. /etc/openwrt_release; echo "${DISTRIB_RELEASE:-?}")} (build ${GHU_SERIAL:-?})"; latest=$inst
+	case "$UA" in true|1) [ -n "$LS" ] && latest="${LO:-${GHU_OPENWRT:-?}} (build $LS)" ;; esac
 	prog=false; case "$ST" in downloading|ready|installing) prog=true ;; esac
 	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
 	case "$ST" in ''|unknown) sum="Checking for updates" ;; esac   # just booted: ghupdate hasn't checked yet
