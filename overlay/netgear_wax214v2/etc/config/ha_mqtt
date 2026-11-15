@@ -13,3 +13,5 @@ config ha_mqtt 'main'
 	option node_id 'netgear'
 	option discovery_prefix 'homeassistant'
 	option topic_prefix 'openwrt-ap'
+	# Per-device Wi-Fi signal and speed sensors, on the HA device that has the station's MAC ('1' = on).
+	option station_sensors '0'

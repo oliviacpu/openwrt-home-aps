@@ -58,7 +58,7 @@ build/publish.sh           all devices: version-drift gate, SHA256SUMS, usign si
 | `usteer`, `luci-app-usteer`, `wpad-mbedtls` | Roaming between the APs on the same SSID with 802.11k/v hints; full hostapd for 802.11v (replaces `wpad-basic-mbedtls`). usteer is built from a pinned upstream commit ([`build/usteer.sh`](build/usteer.sh), SDK of the same release) with its startup aggressiveness patched to 1: 802.11v suggestions only, never a forced disconnect. The shared policy ([`98-usteer-policy`](overlay/common/etc/uci-defaults/98-usteer-policy)) enables polite roaming only with that build, and falls back to zero-kick settings with any other usteer. |
 | Oh My Posh, Oh My Zsh (core), `/root/.zshrc`, `ap-status` | Root logs in to zsh with an Oh My Posh prompt and a status card (firmware, health, LLDP uplink, radios, roaming peers). Oh My Posh is built from a pinned upstream tag for each device's architecture; Oh My Zsh is a pinned commit, core only. The prompt's host name comes from `/etc/ap-id`. |
 | `mosquitto-client-nossl`, rpcd ACL `homeassistant` | Home Assistant: the MQTT client for `ha-mqtt`, and a least-privilege rpcd login for HA's OpenWrt integration over ubus (no firmware, shell or package access). `luci-mod-rpc` is deliberately left out: its `sys.exec` runs any command as root regardless of the ACL. |
-| `ha-mqtt` (+ `/etc/config/ha_mqtt`) | Publishes AP health to Home Assistant via MQTT discovery (firmware update, temperatures, channel load/noise, clients, tx retries/drops, roams, weak clients, uplink). Ships **disabled with no broker credentials**; set them on the device only (`/etc/config/ha_mqtt` is kept across updates). |
+| `ha-mqtt` (+ `/etc/config/ha_mqtt`) | Publishes AP health to Home Assistant via MQTT discovery (firmware update, temperatures, channel load/noise, clients, tx retries/drops, roams, weak clients, uplink, CPU, memory, last boot, channels, port and Wi-Fi traffic, port links, online/offline, processes, system log, new-device events) and takes HA's commands (radio and SSID switches, transmit power, reboot / restart networking / restart Wi-Fi, LED lights, firmware installs). This covers everything HA's OpenWrt (ubus) integration read, so that integration isn't needed. Ships **disabled with no broker credentials**; set them on the device only (`/etc/config/ha_mqtt` is kept across updates). |
 
 Also included: a fix for NTP on dumb APs ([`95-resolv-for-jails`](overlay/common/etc/hotplug.d/iface/95-resolv-for-jails)).
 With dnsmasq off, the sandboxed `sysntpd` can't follow the `/tmp/resolv.conf` symlink and never sets
@@ -87,7 +87,18 @@ AP never reflashes the other; package (security) updates still reach both.
 
 ### Home Assistant
 
-`ha-mqtt` creates the entities via MQTT discovery. The AP also serves its update status at
+`ha-mqtt` creates the entities via MQTT discovery, with the entity ids HA's OpenWrt integration used
+(`sensor.beryl_cpu_usage`, `switch.netgear_spiderweb_5_ghz`, ...). Besides `<prefix>/<node>/state` it
+publishes `availability` (online/offline: the listener's MQTT will, and "online" every cycle),
+`stations` (signal and rates per station), `system` (top processes and the last log lines, every 5
+cycles) and `event/new_device` (the first time a station MAC is seen; the list is in `/etc/ha-mqtt/`
+and kept across updates). With `option station_sensors '1'`, each station with a fixed MAC also gets
+Wi-Fi signal and speed sensors on the HA device that already has that MAC. Commands from HA are
+validated and logged (`logread -e ha-mqtt`); the reboot and restart buttons take one press per 5 min.
+Not carried over from the integration: the Wi-Fi QR code images and the settings-backup button (both
+would put Wi-Fi or broker secrets on the broker).
+
+The AP also serves its update status at
 `http://<ap-address>/cgi-bin/ghupdate-status`; `auto.next` is the Unix time of the next automatic
 install (0 = none planned), and `auto.blocked` says why one won't happen.
 
