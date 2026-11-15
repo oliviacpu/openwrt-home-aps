@@ -2,4 +2,6 @@
 # Enable the ha-mqtt service at boot. It stays idle until /etc/config/ha_mqtt has enabled=1 and a
 # broker host (credentials are set on the device only).
 /etc/init.d/ha-mqtt enable
+# Keep the stations seen so far (new-device events) across updates. sysupgrade skips missing paths.
+grep -qx /etc/ha-mqtt/ /etc/sysupgrade.conf 2>/dev/null || echo /etc/ha-mqtt/ >> /etc/sysupgrade.conf
 exit 0

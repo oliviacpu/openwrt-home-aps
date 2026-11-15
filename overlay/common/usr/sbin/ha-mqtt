@@ -5,11 +5,14 @@
 #
 #   ha-mqtt run        loop forever (procd: /etc/init.d/ha-mqtt)
 #   ha-mqtt dry-run    print the discovery configs and one state message, publish nothing
-#   ha-mqtt listen     commands from HA (procd, second instance): firmware installs, LED lights
+#   ha-mqtt listen     commands from HA (procd, second instance): firmware installs, LED lights,
+#                      radio / SSID switches, transmit power, reboot and restart buttons
 #
 # Every sensor reads one key from a single JSON state topic, and has expire_after = 3 intervals.
 # Missing or implausible data (no 5 GHz AP, no fan, a sensor that isn't ready) is published as null
-# and shows as unknown in HA.
+# and shows as unknown in HA. Besides the state topic: <prefix>/<node>/availability (online/offline,
+# the listener's MQTT will), /stations (per-station signal and rates), /system (top processes and
+# the last log lines, every 5 cycles) and /event/new_device.
 
 cfg() { uci -q get "ha_mqtt.main.$1"; }
 INTERVAL=$(cfg interval); INTERVAL=${INTERVAL:-60}
@@ -19,6 +22,14 @@ HOST_NAME=$(uci -q get system.@system[0].hostname)
 NAME=$(cfg name); NAME=${NAME:-$HOST_NAME}
 NODE=$(cfg node_id); NODE=${NODE:-$(echo "$NAME" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '_' | sed 's/__*/_/g; s/^_//; s/_$//')}
 STATE_TOPIC="$TPREFIX/$NODE/state"
+AVAIL="$TPREFIX/$NODE/availability"
+STA_TOPIC="$TPREFIX/$NODE/stations"
+SYS_TOPIC="$TPREFIX/$NODE/system"
+EVENT_TOPIC="$TPREFIX/$NODE/event/new_device"
+SETP="$TPREFIX/$NODE/set/"      # + radio_2g|radio_5g|ssid_2g|ssid_5g|tx_power_2g|tx_power_5g
+BTNP="$TPREFIX/$NODE/button/"   # + reboot|restart_networking|restart_wifi
+CACHE=/tmp/ha-mqtt/run          # counters between cycles (CPU, traffic, boot time); dry-run uses its own
+KNOWN=/etc/ha-mqtt/known-macs   # every station MAC seen, for the new-device event (kept across updates)
 
 # ---------- helpers ----------
 num() { [ -n "$1" ] && echo "$1" || echo null; }                # JSON number or null
@@ -134,6 +145,122 @@ tailnet() {  # sets TS_* from `tailscale status --json`; all empty when tailscal
 	TS_EXIT=$(jsonfilter -s "$ts" -e '@.ExitNodeStatus.Online' 2>/dev/null)
 }
 bool() { case "$1" in '') echo null ;; true|1) echo true ;; *) echo false ;; esac; }   # JSON boolean or null
+isnum() { case "$1" in ''|*[!0-9.-]*|*.*.*|?*-*|-|.) echo null ;; *) echo "$1" ;; esac; }   # untrusted text -> JSON number or null
+
+# ---------- system, radios, ports, stations ----------
+# What HA's openwrt (ubus) integration used to read, so that integration can go.
+band_oid() { [ "$1" = 2g ] && echo 2_4_ghz || echo 5_ghz; }   # entity-id part, as HA's openwrt integration named them
+band_name() { [ "$1" = 2g ] && echo "2.4 GHz" || echo "5 GHz"; }
+bands() { for b in 2g 5g; do [ -n "$(radio $b)" ] && echo $b; done; }   # bands this AP has a radio for
+ap_section() {  # the first access-point wifi-iface on band $1's radio (the SSID switch)
+	r=$(radio "$1"); [ -n "$r" ] || return
+	for s in $(uci show wireless | sed -n "s/^wireless\.\([^.]*\)\.device='$r'$/\1/p"); do
+		[ "$(uci -q get "wireless.$s.mode")" = ap ] && { echo "$s"; return; }
+	done
+}
+uci_on() { [ -n "$1" ] || { echo null; return; }; [ "$(uci -q get "wireless.$1.disabled")" = 1 ] && echo false || echo true; }
+live() {  # live value from band $1's first AP interface: $2 = channel | txpower (dBm)
+	i=$(aps "$1" | head -n 1); [ -n "$i" ] || return
+	case "$2" in
+		channel) iwinfo "$i" info 2>/dev/null | sed -n 's/.*Channel: \([0-9][0-9]*\) .*/\1/p' | head -n 1 ;;
+		txpower) iwinfo "$i" info 2>/dev/null | sed -n 's/.*Tx-Power: \([0-9][0-9]*\) dBm.*/\1/p' | head -n 1 ;;
+	esac
+}
+txpower_max() {  # highest transmit power (dBm) band $1's radio offers; empty when its AP is down
+	i=$(aps "$1" | head -n 1); [ -n "$i" ] || return
+	iwinfo "$i" txpowerlist 2>/dev/null | awk '{ for (k = 1; k < NF; k++) if ($(k+1) == "dbm" && $k ~ /^[0-9]+$/) v = $k } END { if (v != "") print v }'
+}
+ports() {  # "<ifname> <entity-id part> <name>" per Ethernet port, named like HA's openwrt integration did
+	case "$(cat /tmp/sysinfo/board_name 2>/dev/null)" in
+		glinet,gl-mt3000) echo "eth0 2_5g_port 2.5G port"; echo "eth1 1g_port 1G port" ;;
+		*) for p in lan eth0; do [ -e "/sys/class/net/$p" ] && { echo "$p ethernet Ethernet"; return; }; done ;;
+	esac
+}
+cpu_pct() {  # busy % of all CPUs since the previous cycle (null on the first)
+	set -- $(head -n 1 /proc/stat); shift
+	t=$(( $1 + $2 + $3 + $4 + ${5:-0} + ${6:-0} + ${7:-0} + ${8:-0} )); i=$(( $4 + ${5:-0} ))
+	p=$(cat "$CACHE/cpu" 2>/dev/null); echo "$t $i" > "$CACHE/cpu"
+	awk -v t="$t" -v i="$i" -v p="$p" 'BEGIN { if (split(p, a, " ") == 2 && t > a[1] && i >= a[2]) printf "%.1f", (t - a[1] - (i - a[2])) * 100 / (t - a[1]); else print "null" }'
+}
+mem_pct() { awk '/^MemTotal:/ { t = $2 } /^MemAvailable:/ { a = $2 } END { if (t > 0 && a != "") printf "%.1f", (t - a) * 100 / t; else print "null" }' /proc/meminfo; }
+last_boot() {  # boot time, UTC ISO. Kept unless it moves more than 60 s (an NTP step), so the second
+	# of jitter in now - uptime doesn't change the state every cycle.
+	[ "$(date +%Y)" -ge 2025 ] || return 0   # clock not set yet
+	b=$(( $(date +%s) - $(cut -d. -f1 /proc/uptime) )); o=$(cat "$CACHE/boot" 2>/dev/null)
+	if [ -z "$o" ] || [ $((b - o)) -gt 60 ] || [ $((o - b)) -gt 60 ]; then echo "$b" > "$CACHE/boot"; o=$b; fi
+	date -u -d "@$o" +%Y-%m-%dT%H:%M:%S+00:00
+}
+public_ip() {  # travel router only (where /etc/beryl-mode exists): its internet address, checked every 30 min
+	[ -d /etc/beryl-mode ] || return 0
+	f=$CACHE/public_ip; now=$(date +%s)
+	if [ ! -e "$f" ] || [ $((now - $(date -r "$f" +%s 2>/dev/null || echo 0))) -ge 1800 ]; then
+		ip=$(uclient-fetch -q -T 5 -O - https://api.ipify.org 2>/dev/null | head -c 64)
+		case "$ip" in *[!0-9a-fA-F.:]*) ip= ;; esac
+		echo "$ip" > "$f"
+	fi
+	cat "$f"
+}
+reboot_needed() { [ -e /tmp/.reboot-needed ] || [ -e /var/run/reboot-required ] && echo true || echo false; }
+devices_seen() { brctl showmacs br-lan 2>/dev/null | awk 'NR > 1 && $3 == "no"' | wc -l; }   # MACs the LAN bridge has learned
+counters() {  # "<id> <rx bytes> <tx bytes>" per measured link; "x" where a link has no counters now
+	ports | while read -r ifn oid name; do
+		echo "port_$oid $(cat "/sys/class/net/$ifn/statistics/rx_bytes" 2>/dev/null || echo x) $(cat "/sys/class/net/$ifn/statistics/tx_bytes" 2>/dev/null || echo x)"
+	done
+	for b in $(bands); do   # every band with a radio, so its keys exist (null) while its AP is off
+		l=$(aps $b)
+		[ -n "$l" ] || { echo "ap_$b x x"; continue; }
+		for i in $l; do echo "$(cat "/sys/class/net/$i/statistics/rx_bytes" 2>/dev/null || echo 0) $(cat "/sys/class/net/$i/statistics/tx_bytes" 2>/dev/null || echo 0)"; done |
+			awk -v id="ap_$b" '{ r += $1; t += $2 } END { printf "%s %.0f %.0f\n", id, r, t }'
+	done
+	command -v tailscale >/dev/null 2>&1 && echo "tailscale $(cat /sys/class/net/tailscale0/statistics/rx_bytes 2>/dev/null || echo x) $(cat /sys/class/net/tailscale0/statistics/tx_bytes 2>/dev/null || echo x)"
+}
+rates() {  # JSON members "traffic_<id>_rx|tx" in Mbit/s since the previous cycle; null on the first
+	# cycle, after a counter reset, or for a link without counters
+	now=$(date +%s); cur=$(counters); prev=$(cat "$CACHE/counters" 2>/dev/null)
+	{ echo "ts $now"; echo "$cur"; } > "$CACHE/counters"
+	{ echo "$prev" | sed 's/^/old /'; echo "now $now"; echo "$cur" | sed 's/^/new /'; } | awk '
+		function r(o, c) { if (dt <= 0 || o !~ /^[0-9]+$/ || c !~ /^[0-9]+$/ || c + 0 < o + 0) return "null"; return sprintf("%.2f", (c - o) * 8 / dt / 1000000) }
+		$1 == "old" && $2 == "ts" { ots = $3; next }
+		$1 == "old" && NF == 4 { orx[$2] = $3; otx[$2] = $4; next }
+		$1 == "now" { nts = $2; next }
+		$1 == "new" && NF == 4 { ids[++n] = $2; nrx[$2] = $3; ntx[$2] = $4 }
+		END { dt = (ots == "" ? 0 : nts - ots)
+			for (k = 1; k <= n; k++) { id = ids[k]; printf "\"traffic_%s_rx\":%s,\"traffic_%s_tx\":%s,", id, r(orx[id], nrx[id]), id, r(otx[id], ntx[id]) } }'
+}
+stations() {  # "<mac> <band> <signal dBm> <tx Mbit/s> <rx Mbit/s>" per associated station, MAC lower-case
+	for b in $(bands); do for i in $(aps $b); do iwinfo "$i" assoclist 2>/dev/null | awk -v b=$b '
+		function out() { if (m != "") print m, b, (s == "" ? "-" : s), (tx == "" ? "-" : tx), (rx == "" ? "-" : rx) }
+		/^[0-9A-Fa-f][0-9A-Fa-f](:[0-9A-Fa-f][0-9A-Fa-f])+ / { out(); m = tolower($1); s = tx = rx = ""
+			for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { s = $k; break }; next }
+		$1 == "RX:" { rx = $2 } $1 == "TX:" { tx = $2 }
+		END { out() }'; done; done
+}
+stations_json() {  # the stations file as {"<mac>":{"band":..,"signal":..,"tx_mbps":..,"rx_mbps":..},...}
+	printf '{'
+	sep=
+	while read -r mac band sig tx rx; do
+		case "$mac" in [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;; *) continue ;; esac
+		printf '%s"%s":{"band":"%s","signal":%s,"tx_mbps":%s,"rx_mbps":%s}' "$sep" "$mac" "$band" "$(isnum "$sig")" "$(isnum "$tx")" "$(isnum "$rx")"
+		sep=,
+	done < "$1"
+	printf '}\n'
+}
+random_mac() { case "$1" in ?[26ae]:*) return 0 ;; *) return 1 ;; esac; }   # locally administered: a private, changing address
+system_json() {  # top 10 processes by CPU, the process count and the last 20 log lines (printable ASCII only)
+	top -bn1 2>/dev/null | tr -cd '\n\040-\176' | awk '
+		/^ *PID +PPID/ { f = 1; next }
+		f && NF >= 8 && $1 ~ /^[0-9]+$/ { n++; c = $8; for (k = 9; k <= NF; k++) c = c " " $k; c = substr(c, 1, 120)
+			gsub(/\\/, "\\\\", c); gsub(/"/, "\\\"", c); u = $3; gsub(/[\\"]/, "", u); cpu = $7; sub(/%$/, "", cpu); if (cpu !~ /^[0-9]+$/) cpu = 0
+			printf "%d\t{\"pid\":%d,\"user\":\"%s\",\"cpu\":%d,\"command\":\"%s\"}\n", cpu, $1, u, cpu, c }' |
+		sort -rn | head -n 10 | cut -f2- > "$CACHE/top"
+	count=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)
+	logread -l 20 2>/dev/null | tr -cd '\n\040-\176' | cut -c1-250 > "$CACHE/log"
+	printf '{"process_count":%s,"processes":[' "$count"
+	awk '{ printf "%s%s", (NR > 1 ? "," : ""), $0 }' "$CACHE/top"
+	printf '],"log_last":%s,"logs":[' "$(str "$(tail -n 1 "$CACHE/log")")"
+	awk '{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }' "$CACHE/log"
+	printf ']}\n'
+}
 
 # ---------- LEDs (HA lights) ----------
 # The allow-list is every LED in /sys/class/leds with a plain name, read at startup; commands can
@@ -239,6 +366,73 @@ led_command() {  # $1 slug (from the topic), $2 JSON from HA: {"state":"ON|OFF",
 	j=$(led_state "$n" "$1"); pub "$TPREFIX/$NODE/led/$1/state" "$j" retain && echo "$j" > "/tmp/ha-mqtt/led-state/$1"
 }
 
+# ---------- Wi-Fi switches, transmit power, buttons (HA commands) ----------
+wake() {  # make the publisher send its state now (after $1 s). Only signals a live `ha-mqtt run`:
+	# USR1 would end any other process.
+	( sleep "${1:-0}"; p=$(cat /tmp/ha-mqtt/run.pid 2>/dev/null)
+	  [ -n "$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'ha-mqtt run' && kill -USR1 "$p" ) >/dev/null 2>&1 &
+}
+wifi_command() {  # $1 radio_<band> | ssid_<band> | tx_power_<band>, $2 payload (ON/OFF, or dBm)
+	b=${1##*_}; what=${1%_*}
+	case "$b" in 2g|5g) ;; *) logger -t ha-mqtt "ignored a Wi-Fi command on a bad topic"; return ;; esac
+	r=$(radio "$b"); [ -n "$r" ] || { logger -t ha-mqtt "ignored a Wi-Fi command for a band without a radio"; return; }
+	case "$what" in
+		radio|ssid)
+			case "$2" in ON) v=0 ;; OFF) v=1 ;; *) logger -t ha-mqtt "ignored a Wi-Fi switch command without ON/OFF"; return ;; esac
+			if [ "$what" = radio ]; then sec=$r; label="$(band_name "$b") radio"
+			else sec=$(ap_section "$b"); [ -n "$sec" ] || { logger -t ha-mqtt "ignored an SSID command: no access point on $b"; return; }
+				label="$(band_name "$b") $(uci -q get "wireless.$sec.ssid")"; fi
+			cur=$(uci -q get "wireless.$sec.disabled"); cur=${cur:-0}   # unset means enabled
+			[ "$cur" = "$v" ] || { uci set "wireless.$sec.disabled=$v"; uci commit wireless; wifi reload; }
+			logger -t ha-mqtt "$label: $2 (from Home Assistant)" ;;
+		tx_power)
+			p=${2%.0}
+			case "$p" in ''|*[!0-9]*) logger -t ha-mqtt "ignored a transmit power that isn't a whole number"; return ;; esac
+			max=$(txpower_max "$b"); max=${max:-30}
+			[ "$p" -ge 1 ] && [ "$p" -le "$max" ] || { logger -t ha-mqtt "ignored a transmit power outside 1-$max dBm"; return; }
+			uci set "wireless.$r.txpower=$p"; uci commit wireless; wifi reload
+			logger -t ha-mqtt "$(band_name "$b") transmit power: $p dBm (from Home Assistant)" ;;
+		*) logger -t ha-mqtt "ignored an unknown Wi-Fi command"; return ;;
+	esac
+	wake 5   # the radios take a few seconds to come back with the new setting
+}
+button_command() {  # $1 reboot | restart_networking | restart_wifi, $2 must be PRESS; one press per 5 min each
+	[ "$2" = PRESS ] || { logger -t ha-mqtt "ignored a button command with an unexpected payload"; return; }
+	case "$1" in reboot|restart_networking|restart_wifi) ;; *) logger -t ha-mqtt "ignored an unknown button"; return ;; esac
+	now=$(date +%s); f=/tmp/ha-mqtt/last-$1; last=$(cat "$f" 2>/dev/null || echo 0)
+	[ $((now - last)) -ge 300 ] || { logger -t ha-mqtt "Home Assistant $1 ignored: at most one per 5 min"; return; }
+	echo "$now" > "$f"
+	logger -t ha-mqtt "$1 (from Home Assistant)"
+	case "$1" in   # detached, so this listener answers before the restart cuts it off
+		reboot) ( sleep 2; reboot ) >/dev/null 2>&1 & ;;
+		restart_networking) ( sleep 2; /etc/init.d/network restart ) >/dev/null 2>&1 & ;;
+		restart_wifi) ( sleep 2; wifi; ) >/dev/null 2>&1 & wake 15 ;;
+	esac
+}
+
+# ---------- stations: new-device events, per-device sensors ----------
+new_devices() {  # an HA event for each station MAC this AP has never seen; the first run only records them
+	s=$CACHE/stations; [ -s "$s" ] || return 0
+	mkdir -p "${KNOWN%/*}"
+	if [ ! -e "$KNOWN" ]; then cut -d' ' -f1 "$s" | sort -u > "$KNOWN"; return 0; fi
+	while read -r mac band sig tx rx; do
+		grep -qxF "$mac" "$KNOWN" && continue
+		rnd=false; random_mac "$mac" && rnd=true
+		pub "$EVENT_TOPIC" "$(printf '{"event_type":"new_device","mac":"%s","band":"%s","signal":%s,"random_mac":%s}' "$mac" "$band" "$(isnum "$sig")" "$rnd")" &&
+			echo "$mac" >> "$KNOWN"
+	done < "$s"
+	[ "$(wc -l < "$KNOWN")" -le 1000 ] || { tail -n 500 "$KNOWN" > "$KNOWN.new" && mv "$KNOWN.new" "$KNOWN"; }
+}
+announce_stations() {  # discovery for stations not announced yet; $1 = 1 re-announces every current one
+	[ "$(cfg station_sensors)" = 1 ] || return 0
+	a=$CACHE/stations-announced; [ "$1" = 1 ] && : > "$a"; touch "$a"
+	cut -d' ' -f1 "$CACHE/stations" | sort -u | while read -r mac; do
+		grep -qxF "$mac" "$a" && continue
+		f=$(echo "$mac" | station_discovery | while IFS="$(printf '\t')" read -r t p; do pub "$t" "$p" retain || echo x; done | wc -l)
+		[ "$f" -eq 0 ] && echo "$mac" >> "$a"
+	done
+}
+
 # ---------- one state message ----------
 state() {
 	up=$(uplink)
@@ -281,8 +475,28 @@ state() {
 	printf '"tailnet_connected":%s,"tailnet_state":%s,"tailnet_ip":%s,"tailnet_peers_online":%s,' \
 		"$(bool "$tscon")" "$(str "$TS_STATE")" "$(str "$TS_IP")" "$(num "$([ -n "$TS_STATE" ] && echo "$TS_PEERS")")"
 	printf '"tailnet_problem":%s,"tailnet_health":%s,"tailnet_exit_node":%s,' "$(bool "$tsprob")" "$(str "$TS_HEALTH")" "$(bool "$tsexit")"
-	printf '"mode":%s,"switch":%s,"openwrt_version":%s' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
-	printf '}\n'
+	printf '"mode":%s,"switch":%s,"openwrt_version":%s,' "$(str "$mode")" "$(str "$sw")" "$(str "OpenWrt $DISTRIB_RELEASE")"
+	# System, radios and ports (formerly HA's openwrt integration). The station list is written to
+	# $CACHE/stations for the stations topic, new-device events and per-device sensors.
+	mkdir -p "$CACHE"
+	stations > "$CACHE/stations.new"; mv "$CACHE/stations.new" "$CACHE/stations"
+	set -- $(cat /proc/loadavg)
+	printf '"cpu_usage":%s,"memory_usage":%s,"load":%s,"last_boot":%s,' "$(cpu_pct)" "$(mem_pct)" "$(isnum "$1")" "$(str "$(last_boot)")"
+	printf '"ip_address":%s,"public_ip":%s,"reboot_required":%s,' "$(str "$(lan_ip)")" "$(str "$(public_ip)")" "$(reboot_needed)"
+	printf '"wifi_clients":%s,"devices_seen":%s,' "$(wc -l < "$CACHE/stations" | tr -d ' ')" "$(num "$(devices_seen | tr -d ' ')")"
+	m=$(
+		for b in 2g 5g; do
+			r=$(radio $b); s=; [ -n "$r" ] && s=$(ap_section $b)
+			printf '"channel_%s":%s,"wifi_mode_%s":%s,"tx_power_%s":%s,"radio_%s":%s,"ssid_%s":%s,' \
+				$b "$(num "$(live $b channel)")" $b "$(str "$([ -n "$r" ] && uci -q get "wireless.$r.htmode")")" \
+				$b "$(num "$(live $b txpower)")" $b "$(uci_on "$r")" $b "$(uci_on "$s")"
+		done
+		ports | while read -r ifn oid name; do
+			printf '"link_%s":%s,' "$oid" "$(bool "$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null)")"
+		done
+		rates
+	)
+	printf '%s}\n' "${m%,}"
 }
 
 # ---------- discovery ----------
@@ -330,6 +544,81 @@ tailnet_exit_node|Tailscale exit node in use||mdi:location-exit'
 # Their retained discovery configs are cleared at startup, which removes the stale entities in HA.
 RETIRED='sensor/weak_clients sensor/firmware'
 
+# Entities that replace HA's openwrt (ubus) integration. Their default entity ids are the ones that
+# integration used, so once it's removed HA can give these the same ids (and history).
+ent() {  # ent COMPONENT OBJECT_ID NAME ',"json":"members"' [ENTITY_ID_PART]: one discovery line on this AP
+	printf '%s/%s/%s/%s/config\t{"name":"%s","unique_id":"%s_%s","default_entity_id":"%s.%s_%s"%s,"device":%s}\n' \
+		"$DPREFIX" "$1" "$NODE" "$2" "$(esc "$3")" "$NODE" "$2" "$1" "$NODE" "${5:-$2}" "$4" "$dev"
+}
+st() {  # state-topic members: st KEY [extra members] [value template] [noexpire]
+	# (the default template reads value_json.KEY; numbers and switches have no expire_after)
+	tpl=$3; [ -n "$tpl" ] || tpl="{{ value_json.$1 }}"
+	exp=,\"expire_after\":$((INTERVAL * 3)); [ -n "$4" ] && exp=
+	printf ',"state_topic":"%s","value_template":"%s"%s%s' "$STATE_TOPIC" "$tpl" "$exp" "$2"
+}
+onoff() { printf '{%% if value_json.%s is none %%}None{%% elif value_json.%s %%}ON{%% else %%}OFF{%% endif %%}' "$1" "$1"; }
+DIAG=',"entity_category":"diagnostic"'; CONF=',"entity_category":"config"'; MEAS=',"state_class":"measurement"'
+parity_discovery() {
+	ent sensor cpu_usage "CPU usage" "$(st cpu_usage ',"unit_of_measurement":"%","icon":"mdi:cpu-64-bit"')$MEAS$DIAG"
+	ent sensor memory_usage "Memory usage" "$(st memory_usage ',"unit_of_measurement":"%","icon":"mdi:memory"')$MEAS$DIAG"
+	ent sensor load "Load" "$(st load ',"icon":"mdi:gauge"')$MEAS$DIAG"
+	ent sensor last_boot "Last boot" "$(st last_boot ',"device_class":"timestamp"')$DIAG"
+	ent sensor ip_address "IP address" "$(st ip_address ',"icon":"mdi:ip-network"')$DIAG"
+	[ -d /etc/beryl-mode ] && ent sensor public_ip "Public IP" "$(st public_ip ',"icon":"mdi:earth"')$DIAG"
+	ent sensor wifi_clients "Wi-Fi clients" "$(st wifi_clients ',"icon":"mdi:account-multiple"')$MEAS"
+	ent sensor devices_seen "Devices seen" "$(st devices_seen ',"icon":"mdi:lan"')$MEAS"
+	ent binary_sensor reboot_required "Reboot required" "$(st reboot_required ',"device_class":"problem","payload_on":"ON","payload_off":"OFF"' "$(onoff reboot_required)")$DIAG"
+	ent binary_sensor online "Online" ",\"state_topic\":\"$AVAIL\",\"payload_on\":\"online\",\"payload_off\":\"offline\",\"device_class\":\"connectivity\"$DIAG"
+	ssid=
+	for b in $(bands); do
+		o=$(band_oid $b); n=$(band_name $b)
+		ent sensor "${o}_channel" "$n channel" "$(st channel_$b ',"icon":"mdi:wifi"')$DIAG"
+		ent sensor "${o}_wifi_mode" "$n Wi-Fi mode" "$(st wifi_mode_$b ',"icon":"mdi:wifi-cog"')$DIAG"
+		ent sensor "${o}_traffic_from_clients" "$n traffic from clients" "$(st traffic_ap_${b}_rx ',"unit_of_measurement":"Mbps","icon":"mdi:download-network"')$MEAS"
+		ent sensor "${o}_traffic_to_clients" "$n traffic to clients" "$(st traffic_ap_${b}_tx ',"unit_of_measurement":"Mbps","icon":"mdi:upload-network"')$MEAS"
+		ent switch "${o}_radio" "$n radio" "$(st radio_$b '' "$(onoff radio_$b)" noexpire),\"command_topic\":\"${SETP}radio_$b\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\",\"icon\":\"mdi:radio-tower\"$CONF"
+		s=$(ap_section $b)
+		if [ -n "$s" ]; then
+			ssid=$(uci -q get "wireless.$s.ssid"); slug=$(echo "$ssid" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9\n' '_' | sed 's/__*/_/g; s/^_//; s/_$//')
+			ent switch "ssid_$b" "${ssid:-Wi-Fi} $n" "$(st ssid_$b '' "$(onoff ssid_$b)" noexpire),\"command_topic\":\"${SETP}ssid_$b\",\"payload_on\":\"ON\",\"payload_off\":\"OFF\",\"state_on\":\"ON\",\"state_off\":\"OFF\",\"icon\":\"mdi:wifi\"$CONF" "${slug:-wifi}_$o"
+		fi
+		max=$(txpower_max $b)
+		ent number "${o}_transmit_power" "$n transmit power" "$(st tx_power_$b ',"unit_of_measurement":"dBm","icon":"mdi:signal"' '' noexpire),\"command_topic\":\"${SETP}tx_power_$b\",\"min\":1,\"max\":${max:-30},\"step\":1,\"mode\":\"box\"$CONF"
+	done
+	ports | while read -r ifn oid name; do
+		ent sensor "${oid}_traffic_in" "$name traffic in" "$(st traffic_port_${oid}_rx ',"unit_of_measurement":"Mbps","icon":"mdi:download-network"')$MEAS"
+		ent sensor "${oid}_traffic_out" "$name traffic out" "$(st traffic_port_${oid}_tx ',"unit_of_measurement":"Mbps","icon":"mdi:upload-network"')$MEAS"
+		ent binary_sensor "${oid}_link" "$name link" "$(st link_$oid ',"device_class":"connectivity","payload_on":"ON","payload_off":"OFF"' "$(onoff link_$oid)")"
+	done
+	if command -v tailscale >/dev/null 2>&1; then
+		ent sensor tailscale_traffic_in "Tailscale traffic in" "$(st traffic_tailscale_rx ',"unit_of_measurement":"Mbps","icon":"mdi:download-network"')$MEAS"
+		ent sensor tailscale_traffic_out "Tailscale traffic out" "$(st traffic_tailscale_tx ',"unit_of_measurement":"Mbps","icon":"mdi:upload-network"')$MEAS"
+	fi
+	sx=$((INTERVAL * 15))   # /system is published every 5 cycles
+	ent sensor system_log "System log" ",\"state_topic\":\"$SYS_TOPIC\",\"value_template\":\"{{ value_json.log_last }}\",\"json_attributes_topic\":\"$SYS_TOPIC\",\"json_attributes_template\":\"{{ {'logs': value_json.logs} | tojson }}\",\"expire_after\":$sx,\"icon\":\"mdi:text-box-outline\"$DIAG"
+	ent sensor top_processes "Processes" ",\"state_topic\":\"$SYS_TOPIC\",\"value_template\":\"{{ value_json.process_count }}\",\"json_attributes_topic\":\"$SYS_TOPIC\",\"json_attributes_template\":\"{{ {'top': value_json.processes} | tojson }}\",\"expire_after\":$sx,\"icon\":\"mdi:format-list-numbered\"$MEAS$DIAG"
+	ent button reboot "Reboot" ",\"command_topic\":\"${BTNP}reboot\",\"payload_press\":\"PRESS\",\"device_class\":\"restart\"$CONF"
+	ent button restart_networking "Restart networking" ",\"command_topic\":\"${BTNP}restart_networking\",\"payload_press\":\"PRESS\",\"icon\":\"mdi:lan-pending\"$CONF"
+	ent button restart_wifi "Restart Wi-Fi" ",\"command_topic\":\"${BTNP}restart_wifi\",\"payload_press\":\"PRESS\",\"icon\":\"mdi:wifi-refresh\"$CONF"
+	ent event new_device "New device" ",\"state_topic\":\"$EVENT_TOPIC\",\"event_types\":[\"new_device\"],\"icon\":\"mdi:new-box\""
+}
+# Per-device Wi-Fi signal and speed (uci station_sensors=1). They go on the HA device that already
+# has the station's MAC; randomized (private) MACs get none, since they change.
+station_discovery() {  # stdin: station MACs; prints discovery lines
+	q="'"
+	while read -r mac; do
+		random_mac "$mac" && continue
+		id=$(echo "$mac" | tr -d :)
+		for k in signal speed; do
+			if [ $k = signal ]; then f=signal; nm="Wi-Fi signal"; x=',"unit_of_measurement":"dBm","device_class":"signal_strength"'
+			else f=tx_mbps; nm="Wi-Fi speed"; x=',"unit_of_measurement":"Mbps","icon":"mdi:speedometer"'; fi
+			printf '%s/sensor/%s/sta_%s_%s/config\t{"name":"%s (%s)","unique_id":"%s_sta_%s_%s","default_entity_id":"sensor.%s_%s_wifi_%s","state_topic":"%s","value_template":"{{ (value_json.get(%s%s%s) or {}).get(%s%s%s) }}","expire_after":%s%s,"state_class":"measurement","entity_category":"diagnostic","device":{"connections":[["mac","%s"]]}}\n' \
+				"$DPREFIX" "$NODE" "$id" "$k" "$nm" "$(esc "$NAME")" "$NODE" "$id" "$k" "$NODE" "$id" "$k" "$STA_TOPIC" \
+				"$q" "$mac" "$q" "$q" "$f" "$q" $((INTERVAL * 3)) "$x" "$mac"
+		done
+	done
+}
+
 lan_ip() { ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null; }
 discovery() {  # prints "topic<TAB>payload" lines; uses $LANIP (may be empty: then no configuration_url,
 	# which HA would reject as "http:///" and drop the whole discovery message)
@@ -365,6 +654,7 @@ $TS_SENSORS"
 			"$DPREFIX" "$NODE" "$slug" "$(esc "$(led_name "$n")")" "$NODE" "$slug" "$NODE" "$slug" \
 			"$TPREFIX" "$NODE" "$slug" "$TPREFIX" "$NODE" "$slug" "$modes" "$bs" "$effs" "$dev"
 	done
+	parity_discovery
 	if command -v ghupdate >/dev/null 2>&1; then
 		# Install button only with remote-install (see remote_ok); otherwise read-only.
 		cmd=; remote_ok && cmd=$(printf ',"command_topic":"%s/%s/firmware/install","payload_install":"install"' "$TPREFIX" "$NODE")
@@ -400,10 +690,15 @@ write_opts() {  # broker options live in a 0600 file, never on the command line 
 
 case "${1:-run}" in
 	dry-run)
+		CACHE=/tmp/ha-mqtt/dry; mkdir -p "$CACHE"   # own counters: don't disturb the running publisher's
 		LANIP=$(lan_ip)
 		discovery | sed 's/\t/  /'
 		for k in $RETIRED; do echo "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config  (cleared)"; done
 		echo "$STATE_TOPIC  $(state)"
+		[ "$(cfg station_sensors)" = 1 ] && cut -d' ' -f1 "$CACHE/stations" | station_discovery | sed 's/\t/  /'
+		echo "$STA_TOPIC  $(stations_json "$CACHE/stations")"
+		echo "$SYS_TOPIC  $(system_json)"
+		echo "$AVAIL  online"
 		fw=$(firmware_json); [ -n "$fw" ] && echo "$TPREFIX/$NODE/firmware  $fw"
 		;;
 	run)
@@ -418,6 +713,9 @@ case "${1:-run}" in
 		# state first, and touches discovery only if that worked, so an unreachable broker (e.g. Away
 		# without the tailnet) costs one failed connection per cycle, not dozens.
 		led_snapshot
+		# The listener wakes this loop (SIGUSR1) after a command, so HA sees the change at once.
+		echo $$ > /tmp/ha-mqtt/run.pid
+		SLP=; trap '[ -n "$SLP" ] && kill "$SLP" 2>/dev/null' USR1
 		n=0; announced=; need_announce=1; need_clear=1; up=1
 		while :; do
 			LANIP=$(lan_ip)
@@ -426,6 +724,12 @@ case "${1:-run}" in
 			if pub "$STATE_TOPIC" "$(state)"; then
 				[ "$up" = 1 ] || logger -t ha-mqtt "broker reachable again"
 				up=1
+				# "online" every cycle: it also undoes the listener's will ("offline") after a blip.
+				pub "$AVAIL" online retain
+				pub "$STA_TOPIC" "$(stations_json "$CACHE/stations")"
+				[ $((n % 5)) -eq 0 ] && pub "$SYS_TOPIC" "$(system_json)"
+				new_devices
+				announce_stations "$need_announce"
 				if [ "$need_clear" = 1 ]; then
 					need_clear=0
 					for k in $RETIRED; do clear_retained "$DPREFIX/${k%%/*}/$NODE/${k#*/}/config" || need_clear=1; done
@@ -441,7 +745,7 @@ case "${1:-run}" in
 				[ "$up" = 0 ] || logger -t ha-mqtt "publish to the broker failed; retrying every cycle"
 				up=0
 			fi
-			n=$((n + 1)); sleep "$INTERVAL"
+			n=$((n + 1)); sleep "$INTERVAL" & SLP=$!; wait "$SLP"; SLP=
 		done
 		;;
 	listen)
@@ -454,11 +758,14 @@ case "${1:-run}" in
 		# This side adds the same 15-min limit, so a burst of presses doesn't even reach ghupdate.
 		# LEDs: HA's lights publish JSON to <prefix>/<node>/led/<slug>/set. Only allow-listed LEDs,
 		# only their trigger and brightness files; values are validated (see led_command).
+		# Wi-Fi: <prefix>/<node>/set/<radio|ssid|tx_power>_<band> (see wifi_command); buttons:
+		# <prefix>/<node>/button/<reboot|restart_networking|restart_wifi> (see button_command).
+		# Availability: this subscriber's MQTT will publishes "offline" (retained) when the AP drops
+		# off the broker; the publisher sends "online" every cycle.
 		# -R skips stale retained messages at connect. Every request is logged (logread -e ha-mqtt).
 		[ "$(cfg enabled)" = 1 ] || exit 0
 		ro=0; remote_ok && ro=1
 		LEDS=$(led_list)
-		[ "$ro" = 1 ] || [ -n "$LEDS" ] || { logger -t ha-mqtt "nothing to control (no remote-install, no LEDs)"; exit 0; }
 		[ -n "$(cfg host)" ] || { logger -t ha-mqtt "no broker host set"; exit 1; }
 		command -v mosquitto_sub >/dev/null || { logger -t ha-mqtt "mosquitto_sub not installed"; exit 1; }
 		write_opts
@@ -466,19 +773,21 @@ case "${1:-run}" in
 		led_snapshot
 		PUB_ID=ha-mqtt-$NODE-cmd   # own client id: sharing the publisher's would drop one connection
 		CMD="$TPREFIX/$NODE/firmware/install"; LEDP="$TPREFIX/$NODE/led/"; LAST=/tmp/ha-mqtt/last-install-request
-		set --
-		[ "$ro" = 1 ] && set -- -t "$CMD"
+		set -- -t "${SETP}+" -t "${BTNP}+"
+		[ "$ro" = 1 ] && set -- "$@" -t "$CMD"
 		[ -n "$LEDS" ] && set -- "$@" -t "${LEDP}+/set"
-		logger -t ha-mqtt "listening for Home Assistant commands:$([ "$ro" = 1 ] && echo ' firmware installs')$([ -n "$LEDS" ] && echo " $(echo "$LEDS" | wc -l) LEDs")"
+		logger -t ha-mqtt "listening for Home Assistant commands: Wi-Fi, buttons$([ "$ro" = 1 ] && echo ', firmware installs')$([ -n "$LEDS" ] && echo ", $(echo "$LEDS" | wc -l) LEDs")"
 		# procd stops an instance by killing its main process only. A `mosquitto_sub | while` pipeline
 		# would outlive that, and an orphaned subscriber with the same client id keeps knocking the new
 		# one off the broker, so commands get lost. Hence: clear any leftovers for this node first,
 		# read through a FIFO in this shell, and stop our subscriber on TERM.
 		for p in $(ps w | grep '[m]osquitto_sub' | grep -F "$TPREFIX/$NODE/" | awk '{ print $1 }'); do kill "$p" 2>/dev/null; done
 		F=/tmp/ha-mqtt/commands.fifo; rm -f "$F"; mkfifo -m 600 "$F" || exit 1
-		XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_sub -v -R -q 1 "$@" > "$F" &
+		XDG_CONFIG_HOME=/tmp/ha-mqtt mosquitto_sub -v -R -q 1 --will-topic "$AVAIL" --will-payload offline --will-retain --will-qos 1 "$@" > "$F" &
 		SUB=$!
-		trap 'kill "$SUB" 2>/dev/null; rm -f "$F"; exit 0' TERM INT HUP
+		# SIGKILL, not TERM: a clean disconnect would cancel the will, and HA should see "offline" when
+		# the AP reboots or the service stops (the publisher's next "online" follows a restart).
+		trap 'kill -9 "$SUB" 2>/dev/null; rm -f "$F"; exit 0' TERM INT HUP
 		while IFS= read -r line; do
 			topic=${line%% *}; msg=; [ "$topic" = "$line" ] || msg=${line#* }
 			case "$topic" in
@@ -501,6 +810,12 @@ case "${1:-run}" in
 				slug=${topic#"$LEDP"}; slug=${slug%/set}
 				case "$slug" in '' | */* | *[!a-z0-9_]*) logger -t ha-mqtt "ignored an LED command on a bad topic"; continue ;; esac
 				led_command "$slug" "$msg"
+				;;
+			"$SETP"*)
+				wifi_command "${topic#"$SETP"}" "$msg"
+				;;
+			"$BTNP"*)
+				button_command "${topic#"$BTNP"}" "$msg"
 				;;
 			esac
 		done < "$F"
