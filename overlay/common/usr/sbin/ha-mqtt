@@ -105,9 +105,10 @@ firmware_json() {  # this image's updates (ghupdate) for the MQTT update entity
 	ST= UA= LS= LO= LU= MSG= BLK=
 	eval "$(ghupdate status 2>/dev/null | jsonfilter -e 'ST=@.state' -e 'UA=@.update_available' -e 'LS=@.latest.serial' \
 		-e 'LO=@.latest.openwrt' -e 'LU=@.latest.url' -e 'MSG=@.message' -e 'BLK=@.auto.blocked')"
-	# "<OpenWrt version> (build <n>)": the OpenWrt release the image is based on, then this repo's build.
-	inst="${GHU_OPENWRT:-$(. /etc/openwrt_release; echo "${DISTRIB_RELEASE:-?}")} (build ${GHU_SERIAL:-?})"; latest=$inst
-	case "$UA" in true|1) [ -n "$LS" ] && latest="${LO:-${GHU_OPENWRT:-?}} (build $LS)" ;; esac
+	# "<OpenWrt version>-b<n>", like the release tags: the OpenWrt release the image is based on, and
+	# this repo's build (needed: two builds of one OpenWrt release must differ for HA to offer the update).
+	inst="${GHU_OPENWRT:-$(. /etc/openwrt_release; echo "${DISTRIB_RELEASE:-?}")}-b${GHU_SERIAL:-?}"; latest=$inst
+	case "$UA" in true|1) [ -n "$LS" ] && latest="${LO:-${GHU_OPENWRT:-?}}-b$LS" ;; esac
 	prog=false; case "$ST" in downloading|ready|installing) prog=true ;; esac
 	sum=${MSG:-${ST:-unknown}}; [ -n "$BLK" ] && sum="$sum. Automatic installs on hold: $BLK"
 	case "$ST" in ''|unknown) sum="Checking for updates" ;; esac   # just booted: ghupdate hasn't checked yet
