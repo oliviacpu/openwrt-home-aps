@@ -5,14 +5,16 @@
 #   uplink clean = an HTTP probe sent out the raw uplink returns 204. A captive portal answers
 #                  with its login page instead. The probe binds to the uplink interface, so it
 #                  bypasses the exit node, which also carries the router's own traffic once on.
-#   tailnet ok   = tailscaled is Running and monochrome is online.
-# Both ok: the exit node is monochrome, home routes are accepted, and DNS goes to Pi-hole (.32)
-# through the tunnel.
+#   tailnet ok   = tailscaled is Running and spiderweb is online.
+# Both ok: the exit node is spiderweb (monochrome's PIA container, leaving from PIA US Chicago),
+# home routes are accepted through monochrome's 192.168.1.0/24 route, and DNS goes to Pi-hole
+# (.32) through the tunnel.
 # Otherwise: no exit node, and DNS goes to the uplink's own servers, so a hotel login page is
 # always reachable and a dead tunnel never strands the travel LAN.
 # DNS switching rewrites /tmp/beryl-resolv.conf, which dnsmasq (resolvfile in Away's dhcp
 # config) re-reads on change.
-EXIT=monochrome
+# Matched against the peer's OS hostname (TS_HOSTNAME in its Coolify compose), not its admin-console name.
+EXIT=spiderweb
 PIHOLE=192.168.1.32
 PROBE=http://connectivitycheck.gstatic.com/generate_204
 RESOLV=/tmp/beryl-resolv.conf
