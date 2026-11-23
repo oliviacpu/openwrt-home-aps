@@ -132,8 +132,14 @@ signals() {  # "dBm MAC" for every station on this AP's access points (same as h
 	for i in $(aps 2g) $(aps 5g); do iwinfo "$i" assoclist 2>/dev/null; done |
 	awk '/^[0-9A-Fa-f][0-9A-Fa-f]:/ { for (k = 2; k < NF; k++) if ($(k+1) == "dBm") { print $k, $1; break } }'; }
 uplink() { for p in lan eth0; do [ -r "/sys/class/net/$p/speed" ] && { echo "$p"; return; }; done; }
-flash() {  # "<free MB> <use %>" of the writable overlay (where settings and installed extras live)
-	df -Pk /overlay 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { sub(/%$/, "", $5); print int($4 / 1024), $5 }'
+flash() {  # "<free MB> <use %>": free is the writable overlay (where settings and extras go), use is the
+	# whole OpenWrt flash: the read-only firmware (/rom, always full) plus the overlay. The overlay alone
+	# read 0 % on both APs, because with every package built into the image it holds only settings
+	# (60 KB of 14 MB on the WAX), so the gauge said nothing about the flash.
+	df -Pk /rom /overlay 2>/dev/null | awk '
+		$6 == "/rom" && $2 ~ /^[0-9]+$/ { rs = $2; ru = $3 }
+		$6 == "/overlay" && $4 ~ /^[0-9]+$/ { os = $2; ou = $3; of = $4; seen = 1 }
+		END { if (seen) printf "%d %.1f\n", of / 1024, (rs + os) ? 100 * (ru + ou) / (rs + os) : 0 }'
 }
 tailnet() {  # sets TS_* from `tailscale status --json`; all empty when tailscale or tailscaled is absent.
 	# jsonfilter exports arrays as their indexes, so array elements are read with [*].
