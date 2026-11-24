@@ -95,6 +95,9 @@ cycles) and `event/new_device` (the first time a station MAC is seen; the list i
 and kept across updates). With `option station_sensors '1'`, each station with a fixed MAC also gets
 Wi-Fi signal and speed sensors on its own HA device, named by its MAC (rename it in HA; both APs' sensors share it). Commands from HA are
 validated and logged (`logread -e ha-mqtt`); the reboot and restart buttons take one press per 5 min.
+A station MAC published to `<prefix>/<node>/disconnect` (not retained) deauthenticates that station
+on every radio of the AP so it has to rejoin, at most once a minute; it is for clients that freeze
+with the link up, and HA's automations send it (there is no entity for it).
 Not carried over from the integration: the Wi-Fi QR code images and the settings-backup button (both
 would put Wi-Fi or broker secrets on the broker).
 
