@@ -28,6 +28,7 @@ SYS_TOPIC="$TPREFIX/$NODE/system"
 EVENT_TOPIC="$TPREFIX/$NODE/event/new_device"
 SETP="$TPREFIX/$NODE/set/"      # + radio_2g|radio_5g|ssid_2g|ssid_5g|tx_power_2g|tx_power_5g
 BTNP="$TPREFIX/$NODE/button/"   # + reboot|restart_networking|restart_wifi
+DISC="$TPREFIX/$NODE/disconnect" # payload: a station MAC to knock off this AP
 CACHE=/tmp/ha-mqtt/run          # counters between cycles (CPU, traffic, boot time); dry-run uses its own
 KNOWN=/etc/ha-mqtt/known-macs   # every station MAC seen, for the new-device event (kept across updates)
 
@@ -418,6 +419,23 @@ button_command() {  # $1 reboot | restart_networking | restart_wifi, $2 must be 
 		restart_wifi) ( sleep 2; wifi; ) >/dev/null 2>&1 & wake 15 ;;
 	esac
 }
+disconnect_command() {  # $1 a station MAC. Deauthenticates it on every radio of this AP, so it has to
+	# rejoin: some clients freeze with the link up but nothing flowing, and only a rejoin wakes them
+	# (the bedroom Blueair purifier, 2026-11-23). ban_time 0: it may come straight back. One per minute.
+	mac=$(echo "$1" | tr 'A-F' 'a-f')
+	echo "$mac" | grep -Eqx '([0-9a-f]{2}:){5}[0-9a-f]{2}' || { logger -t ha-mqtt "ignored a disconnect without a valid MAC"; return; }
+	now=$(date +%s); f=/tmp/ha-mqtt/last-disconnect; last=$(cat "$f" 2>/dev/null || echo 0)
+	[ $((now - last)) -ge 60 ] || { logger -t ha-mqtt "Home Assistant disconnect ignored: at most one per minute"; return; }
+	echo "$now" > "$f"
+	found=
+	for obj in $(ubus list 'hostapd.*' 2>/dev/null); do
+		ubus call "$obj" get_clients 2>/dev/null | grep -qF "\"$mac\"" || continue
+		ubus call "$obj" del_client "{\"addr\":\"$mac\",\"reason\":3,\"deauth\":true,\"ban_time\":0}" >/dev/null 2>&1
+		found="$found ${obj#hostapd.}"
+	done
+	if [ -n "$found" ]; then logger -t ha-mqtt "disconnected $mac from$found (from Home Assistant)"; wake 5
+	else logger -t ha-mqtt "disconnect from Home Assistant: $mac is not on this AP"; fi
+}
 
 # ---------- stations: new-device events, per-device sensors ----------
 new_devices() {  # an HA event for each station MAC this AP has never seen; the first run only records them
@@ -772,6 +790,7 @@ case "${1:-run}" in
 		# only their trigger and brightness files; values are validated (see led_command).
 		# Wi-Fi: <prefix>/<node>/set/<radio|ssid|tx_power>_<band> (see wifi_command); buttons:
 		# <prefix>/<node>/button/<reboot|restart_networking|restart_wifi> (see button_command).
+		# Disconnect: a station MAC on <prefix>/<node>/disconnect (see disconnect_command).
 		# Availability: this subscriber's MQTT will publishes "offline" (retained) when the AP drops
 		# off the broker; the publisher sends "online" every cycle.
 		# -R skips stale retained messages at connect. Every request is logged (logread -e ha-mqtt).
@@ -785,10 +804,10 @@ case "${1:-run}" in
 		led_snapshot
 		PUB_ID=ha-mqtt-$NODE-cmd   # own client id: sharing the publisher's would drop one connection
 		CMD="$TPREFIX/$NODE/firmware/install"; LEDP="$TPREFIX/$NODE/led/"; LAST=/tmp/ha-mqtt/last-install-request
-		set -- -t "${SETP}+" -t "${BTNP}+"
+		set -- -t "${SETP}+" -t "${BTNP}+" -t "$DISC"
 		[ "$ro" = 1 ] && set -- "$@" -t "$CMD"
 		[ -n "$LEDS" ] && set -- "$@" -t "${LEDP}+/set"
-		logger -t ha-mqtt "listening for Home Assistant commands: Wi-Fi, buttons$([ "$ro" = 1 ] && echo ', firmware installs')$([ -n "$LEDS" ] && echo ", $(echo "$LEDS" | wc -l) LEDs")"
+		logger -t ha-mqtt "listening for Home Assistant commands: Wi-Fi, buttons, disconnect$([ "$ro" = 1 ] && echo ', firmware installs')$([ -n "$LEDS" ] && echo ", $(echo "$LEDS" | wc -l) LEDs")"
 		# procd stops an instance by killing its main process only. A `mosquitto_sub | while` pipeline
 		# would outlive that, and an orphaned subscriber with the same client id keeps knocking the new
 		# one off the broker, so commands get lost. Hence: clear any leftovers for this node first,
@@ -828,6 +847,9 @@ case "${1:-run}" in
 				;;
 			"$BTNP"*)
 				button_command "${topic#"$BTNP"}" "$msg"
+				;;
+			"$DISC")
+				disconnect_command "$msg"
 				;;
 			esac
 		done < "$F"
